@@ -6,7 +6,9 @@
 Usage:  python scripts/smoke_test.py
 """
 import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, "tests"))
 import numpy as np
 import torch
 
@@ -15,7 +17,7 @@ from nssr.train import to_torch, forward_object
 from nssr.geometry import hermite_surface, zero_params, surface_points
 from nssr.networks import ParamNet, contour_features
 from nssr.losses import chamfer
-from tests.numpy_sanity_check import hermite_surface_np
+from numpy_sanity_check import hermite_surface_np
 
 def main():
     dev = "cuda" if torch.cuda.is_available() else "cpu"
