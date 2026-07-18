@@ -1,0 +1,8 @@
+numpy>=1.26
+scipy>=1.11
+torch>=2.1
+matplotlib>=3.7
+trimesh>=4.0        # real-mesh slicing (Phase 1b)
+shapely>=2.0        # trimesh polygon support
+scikit-image>=0.22  # marching cubes for the implicit baseline
+pandas>=2.0         # result tables
