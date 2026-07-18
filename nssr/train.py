@@ -27,16 +27,21 @@ def to_torch(sample, m=256, device="cpu", dtype=torch.float32,
         / nrm["scale"]
     return {"R": T(pre["R"]), "Z": T(pre["Z"]), "RB": T(pre["RB"]),
             "RC": T(pre["RC"]), "Bh": T(pre["Bh"]), "Th": T(pre["Th"]),
-            "gt_pts": T(gt), "gt_normals": T(sample["gt_normals"][idx])}
+            "gt_pts": T(gt), "gt_normals": T(sample["gt_normals"][idx]),
+            "base_circular": pre.get("base_circular", True),
+            "crown_circular": pre.get("crown_circular", True),
+            "closed_top": pre.get("closed_top", True)}
 
 
-def forward_object(net, obj, n_u=24, closed_top=True):
+def forward_object(net, obj, n_u=24):
     feats = contour_features(obj["R"], obj["Z"], obj["RB"], obj["RC"],
                              obj["Bh"], obj["Th"])
     params = net(feats)
     S = hermite_surface(obj["R"], obj["Z"], obj["RB"], obj["RC"],
                         obj["Bh"], obj["Th"], params, n_u=n_u,
-                        closed_top=closed_top)
+                        closed_top=obj.get("closed_top", True),
+                        base_circular=obj.get("base_circular", True),
+                        crown_circular=obj.get("crown_circular", True))
     pts = surface_points(S)
     nrms = surface_normals(S).reshape(-1, 3)
     return S, pts, nrms, params

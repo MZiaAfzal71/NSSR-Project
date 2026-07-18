@@ -54,12 +54,8 @@ nssr-project/
 │   └── evaluate.py
 ├── baselines/
 │   └── implicit_baseline.py   ← minimal OReX-style occupancy MLP baseline
-├── reference/                 ← YOUR CiSE implementation, vendored verbatim
-│                                (curves/surfaces, loops + torch, shape data)
 └── tests/
-    ├── numpy_sanity_check.py  ← analytic-object sanity check (verified ✓)
-    └── parity_check.py        ← NSSR classical == reference implementation
-                                 on banana/apple/vase, elementwise (~1e-11 ✓)
+    └── numpy_sanity_check.py  ← NumPy mirror of the core math (verified)
 ```
 
 ---
@@ -71,9 +67,8 @@ nssr-project/
 ```bash
 python -m venv venv && source venv/bin/activate     # or conda
 pip install -r requirements.txt
-python tests/numpy_sanity_check.py    # analytic-object check (no torch)
-python tests/parity_check.py          # NSSR == your reference code (no torch)
-python scripts/smoke_test.py          # torch == geometry_np + gradients flow
+python tests/numpy_sanity_check.py    # verifies the math (no torch needed)
+python scripts/smoke_test.py          # verifies torch pipeline + gradients
 ```
 
 The smoke test checks: (a) with zero parameters the torch pipeline matches
@@ -81,18 +76,11 @@ the NumPy classical implementation; (b) gradients flow from a Chamfer loss
 back to the network parameters; (c) a sphere is reconstructed from 7 circles
 with small error.
 
-**Phase 0 reconciliation: DONE.** Your uploaded reference code resolved all
-ambiguities and `tests/parity_check.py` now proves elementwise agreement
-(~1e-11) on banana, apple, and vase for gR, gz, gRB, gRC, fb, fc, FR, Fz.
-Three manuscript-vs-code divergences were found and settled in favor of the
-code (fix these equations when writing the new paper): Eq. 21 denominators
-(crown tangent), Eqs. 25–26 (fb/fc DIVIDE by the sqrt term), Eq. 22 (η/β₁
-definitions and the crown E direction).  See docs/METHOD.md "RESOLVED" notes.
-
-Also available now: `python scripts/reconstruct_designer.py --ds banana
---mode classical|net|tto` — runs NSSR on your paper's shapes (classical
-render, trained-network generalization, or training-data-free leave-one-
-slice-out test-time optimization).
+**Also in Phase 0:** reconcile `nssr/geometry.py` with your reference
+implementation from the CiSE paper. Spots marked `TODO(verify)` are places
+where the manuscript equations were ambiguous (notably the crown tangent
+Eq. 21 denominators and the boundary-direction η definition). Your original
+code is the ground truth; adjust mine to match, then re-run the smoke test.
 
 ### Phase 1 — Data (Week 1–2)
 

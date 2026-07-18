@@ -80,10 +80,12 @@ initializing the bias of the s^a output head at ln 2 for boundary rows:
 Crown (i = N−1) is symmetric with virtual point R_{N,j} = R_C, Z_N = T_h
 and the factor 2 on the b-side.
 
-> **TODO(verify):** manuscript Eq. 21 prints |ΔZ_N| in both denominator
-> terms of g_R(N−1,j) and mixed indices in g_Z; the code implements the
-> symmetric analog of the base formula. Reconcile with your reference
-> implementation.
+> **RESOLVED (reference code, verified by tests/parity_check.py):** the
+> manuscript's Eq. 21 denominators are typos; the reference implementation
+> computes the symmetric analog of the base formula —
+> g_R(N−1,j) = (a_R (B−A) + 2 b_R (R_C−B)) / (a_R |ΔZ_{N−1}| + 2 b_R |ΔZ_N|)
+> with a_R = ‖R_C−B‖, b_R = ‖B−A‖ — which is what NSSR implements.
+> **Fix Eq. 21 in the new manuscript.**
 
 ### 2.4 Ablation: free-residual tangents (breaking the cone)
 

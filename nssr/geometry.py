@@ -107,59 +107,57 @@ def tangent_field(R, Z, RB, RC, Bh, Th, params, closed_top=True):
 # ----------------------------------------------------------------------
 # Boundary directions (Eqs. 22-24) and scalings (Eqs. 25-26)
 # ----------------------------------------------------------------------
-def boundary_directions(R, Z, P0, Bh, at_base=True, eps=1e-6):
-    """gRB(j) (m, 2).  P0 = RB (base) or RC (crown).
-
-    Implements the manuscript formulas as written; kappa = 1 + (j mod 15).
-    TODO(verify): reconcile eta definition with the reference implementation.
-    """
+def boundary_directions(R, Z, RB, RC, Bh, Th, at_base=True, eps=1e-8):
+    """gRB / gRC (m, 2) — reconciled with reference/surfaces_pytorch.py:
+    base : E = (R0 - RB)/||.||, beta1 = (Bh - a1*(Z0-Bh)) / (Z1-Z0)
+    crown: E = (RC - R_{N-1})/||.||,
+           beta1 = (Th - a1*(Z_{N-1}-Z_{N-2})) / (Th - Z_{N-1})
+    with a1 = 1 + (j mod 15), D_k = a_k*BA + b_k*CB, F = (D1-D2)/||.||,
+    selection: E if |ExF| < eps else (F if E.F > 0 else -F).
+    Verified elementwise by tests/parity_check.py."""
     N, m, _ = R.shape
     dev, dt = R.device, R.dtype
-    if at_base:
-        A = P0.expand(m, 2)
-        B = R[0]
-        C = R[1]
-        dZ0 = Z[0] - Bh
-        dZ1 = Z[1] - Z[0]
-        H = Bh
-    else:                                   # crown: analog with roles reversed
-        A = P0.expand(m, 2)
-        B = R[N - 1]
-        C = R[N - 2]
-        dZ0 = Z[N - 1] - Z[N - 2]
-        dZ1 = dZ0
-        H = Z[N - 1]
     j = torch.arange(m, device=dev, dtype=dt)
-    k1 = 1.0 + torch.remainder(j, 15.0)
-    e1 = (H - k1 * dZ0) / (dZ1 + EPS)
-    k2 = -k1
-    e2 = (H - k2 * dZ0) / (dZ1 + EPS)
-    BA = B - A
-    CB = C - B
-    D1 = k1.unsqueeze(-1) * BA + e1.unsqueeze(-1) * CB
-    D2 = k2.unsqueeze(-1) * BA + e2.unsqueeze(-1) * CB
-    e = BA / _norm(BA)
-    f = (D1 - D2) / _norm(D1 - D2)
-    c = _cross2(e, f).abs()
-    d = (e * f).sum(-1)
-    out = torch.where((c < eps).unsqueeze(-1), e,
-          torch.where((d > 0).unsqueeze(-1), f, -f))
+    a1 = 1.0 + torch.remainder(j, 15.0)
+    if at_base:
+        B, C = R[0], R[1]
+        b1 = (Bh - a1 * (Z[0] - Bh)) / (Z[1] - Z[0])
+        b2 = (Bh + a1 * (Z[0] - Bh)) / (Z[1] - Z[0])
+        BA = B - RB
+        CB = C - B
+        E = BA / _norm(BA)
+    else:
+        A, B = R[N - 2], R[N - 1]
+        b1 = (Th - a1 * (Z[N - 1] - Z[N - 2])) / (Th - Z[N - 1])
+        b2 = (Th + a1 * (Z[N - 1] - Z[N - 2])) / (Th - Z[N - 1])
+        BA = B - A
+        CB = RC - B
+        E = CB / _norm(CB)
+    D1 = a1.unsqueeze(-1) * BA + b1.unsqueeze(-1) * CB
+    D2 = -a1.unsqueeze(-1) * BA + b2.unsqueeze(-1) * CB
+    F = (D1 - D2) / _norm(D1 - D2)
+    c = _cross2(E, F).abs()
+    d = (E * F).sum(-1)
+    out = torch.where((c < eps).unsqueeze(-1), E,
+          torch.where((d > 0).unsqueeze(-1), F, -F))
     return out
 
 
 def boundary_scalings(R, RB, RC, Z, Bh, Th, gR, params, closed_top=True):
-    """f_B(j), f_C(j)  (Eqs. 25-26) with learned multipliers (L2)."""
+    """f_B(j), f_C(j) with learned multipliers (L2).
+    Reconciled with the reference code: DIVIDES by the sqrt term
+    (the manuscript Eqs. 25-26 print a multiplication; the reference
+    implementation divides — the code is authoritative).  Verified by
+    tests/parity_check.py."""
     m = R.shape[1]
-    rB = R[0] - RB                                  # (m, 2)
-    nB = _norm(rB).squeeze(-1)
-    gB = _norm(gR[0]).squeeze(-1)
-    fB = (2.0 ** 0.5) * nB * torch.sqrt(1.0 + (Z[0] - Bh).abs() * gB / (nB + EPS))
+    nB = _norm(R[0] - RB).squeeze(-1)
+    gB = _norm(gR[0] / nB.unsqueeze(-1)).squeeze(-1)
+    fB = (2.0 ** 0.5) * nB / torch.sqrt(1.0 + (Z[0] - Bh).abs() * gB)
     fB = fB * torch.exp(params["s_fB"])
     if closed_top:
-        rC = R[-1] - RC
-        nC = _norm(rC).squeeze(-1)
-        gC = _norm(gR[-1]).squeeze(-1)
-        fC = (2.0 ** 0.5) * nC * torch.sqrt(1.0 + (Th - Z[-1]).abs() * gC / (nC + EPS))
+        nC = _norm(RC - R[-1]).squeeze(-1)
+        gC = _norm(gR[-1] / nC.unsqueeze(-1)).squeeze(-1)
+        fC = (2.0 ** 0.5) * nC / torch.sqrt(1.0 + (Th - Z[-1]).abs() * gC)
         fC = fC * torch.exp(params["s_fC"])
     else:
         fC = torch.zeros(m, device=R.device, dtype=R.dtype)
@@ -178,7 +176,8 @@ def hermite_basis(u):
 
 
 def hermite_surface(R, Z, RB, RC, Bh, Th, params, n_u=32,
-                    closed_top=True, circular_caps=True):
+                    closed_top=True, base_circular=True,
+                    crown_circular=True):
     """Evaluate the full surface.  Returns:
        pts : (n_patches, n_u, m, 3) surface points, patch order =
              [base cap (if any), interior 1..N-1, crown cap (if any)]
@@ -197,8 +196,8 @@ def hermite_surface(R, Z, RB, RC, Bh, Th, params, n_u=32,
 
     # ---- base cap (patch between RB and contour 0), Eqs. 31-32 ----------
     dZ0 = (Z[0] - Bh).abs()
-    if circular_caps:
-        gRB = boundary_directions(R, Z, RB, Bh, at_base=True)
+    if base_circular:
+        gRB = boundary_directions(R, Z, RB, RC, Bh, Th, at_base=True)
         FR = (L0 * RB.view(1, 1, 2) + L1 * R[0].unsqueeze(0)
               + H0 * (fB.unsqueeze(-1) * gRB).unsqueeze(0)
               + 2.0 * dZ0 * H1 * gR[0].unsqueeze(0))          # (n_u, m, 2)
@@ -226,8 +225,8 @@ def hermite_surface(R, Z, RB, RC, Bh, Th, params, n_u=32,
     # ---- crown cap (Eqs. 35-36 / 37-38) ---------------------------------
     if closed_top:
         dZN = (Th - Z[-1]).abs()
-        if circular_caps:
-            gRC = boundary_directions(R, Z, RC, Th, at_base=False)
+        if crown_circular:
+            gRC = boundary_directions(R, Z, RB, RC, Bh, Th, at_base=False)
             FR = (L0 * R[-1].unsqueeze(0) + L1 * RC.view(1, 1, 2)
                   + H1 * (fC.unsqueeze(-1) * gRC).unsqueeze(0)
                   + 2.0 * dZN * H0 * gR[-1].unsqueeze(0))

@@ -6,9 +6,7 @@
 Usage:  python scripts/smoke_test.py
 """
 import sys, os
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.join(ROOT, "tests"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 import torch
 
@@ -17,7 +15,7 @@ from nssr.train import to_torch, forward_object
 from nssr.geometry import hermite_surface, zero_params, surface_points
 from nssr.networks import ParamNet, contour_features
 from nssr.losses import chamfer
-from numpy_sanity_check import hermite_surface_np
+from nssr.geometry_np import hermite_surface_np
 
 def main():
     dev = "cuda" if torch.cuda.is_available() else "cpu"
@@ -33,12 +31,11 @@ def main():
     np_args = [obj[k].cpu().numpy() for k in ("R", "Z", "RB", "RC")]
     S_n = hermite_surface_np(*np_args, float(obj["Bh"]), float(obj["Th"]),
                              n_u=16)
-    # NOTE: the numpy mirror uses the analytic radial cap direction while
-    # torch uses Eq. 22-24 boundary directions -> compare interior patches.
-    diff = (S_t[1:-1].cpu().numpy() - S_n[1:-1])
-    err = np.abs(diff).max()
-    print(f"1) interior torch-vs-numpy max abs diff: {err:.2e}",
-          "OK" if err < 1e-10 else "MISMATCH -- investigate")
+    # geometry_np is reference-parity verified (tests/parity_check.py),
+    # so torch must match it on ALL patches, caps included.
+    err = np.abs(S_t.cpu().numpy() - S_n).max()
+    print(f"1) full-surface torch-vs-numpy max abs diff: {err:.2e}",
+          "OK" if err < 1e-9 else "MISMATCH -- investigate")
 
     # --- 2. gradient flow ------------------------------------------------
     net = ParamNet().to(device=dev, dtype=torch.float64)
