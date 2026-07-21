@@ -50,7 +50,8 @@ def forward_object(net, obj, n_u=24):
 def train(samples, val_samples, out_dir="runs/exp1", epochs=200, lr=1e-3,
           m=256, n_u=24, device=None, dtype=torch.float32,
           lam_n=0.1, lam_r=1e-3, lam_s=1e-3, accum=8,
-          free_residual=False, seed=0):
+          free_residual=False, seed=0, surf_sub=20000, gt_sub=20000,
+          val_every=5, patience=0, val_subset=0, eval_n_u=None):
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs(out_dir, exist_ok=True)
     torch.manual_seed(seed)
@@ -71,6 +72,7 @@ def train(samples, val_samples, out_dir="runs/exp1", epochs=200, lr=1e-3,
                      "val_chamfer_l2", "val_hausdorff", "c1_min", "secs"])
 
     best = float("inf")
+    bad = 0
     for epoch in range(epochs + 1):                     # epoch 0 = classical
         t0 = time.time()
         net.train()
@@ -82,7 +84,8 @@ def train(samples, val_samples, out_dir="runs/exp1", epochs=200, lr=1e-3,
             _, pts, nrms, params = forward_object(net, obj, n_u=n_u)
             loss, parts = total_loss(pts, nrms, obj["gt_pts"],
                                      obj["gt_normals"], params,
-                                     lam_n, lam_r, lam_s)
+                                     lam_n, lam_r, lam_s,
+                                     surf_sub=surf_sub, gt_sub=gt_sub)
             if epoch > 0:                                # epoch 0: eval only
                 (loss / accum).backward()
                 if (step + 1) % accum == 0:
@@ -92,26 +95,42 @@ def train(samples, val_samples, out_dir="runs/exp1", epochs=200, lr=1e-3,
         if epoch > 0:
             sched.step()
 
-        # validation
-        net.eval()
-        vs, hs, c1s = [], [], []
-        with torch.no_grad():
-            for obj in val_objs:
-                _, pts, nrms, params = forward_object(net, obj, n_u=n_u)
-                mets = evaluate_surface(pts, obj["gt_pts"], nrms,
-                                        obj["gt_normals"])
-                gR, gZ = tangent_field(obj["R"], obj["Z"], obj["RB"],
-                                       obj["RC"], obj["Bh"], obj["Th"], params)
-                vs.append(mets["chamfer_l2"]); hs.append(mets["hausdorff"])
-                c1s.append(c1_diagnostic(gR, gZ)["global_min"])
-        row = [epoch, tot / nb, totc / nb, float(np.mean(vs)),
-               float(np.mean(hs)), float(np.min(c1s)), time.time() - t0]
-        logger.writerow(row); logf.flush()
-        tag = "  <-- CLASSICAL BASELINE" if epoch == 0 else ""
-        print(f"ep {epoch:3d} | loss {row[1]:.5f} | val CD {row[3]:.6f} "
-              f"| val H {row[4]:.4f} | C1min {row[5]:.3f}{tag}")
-        if epoch > 0 and row[3] < best:
-            best = row[3]
-            torch.save(net.state_dict(), os.path.join(out_dir, "best.pt"))
+        # ---- validation: only every val_every epochs (and epoch 0 / last) ----
+        do_val = (epoch % val_every == 0) or (epoch == epochs)
+        e_nu = eval_n_u or n_u
+        if do_val:
+            net.eval()
+            vobjs = val_objs if val_subset <= 0 else val_objs[:val_subset]
+            vs, hs, c1s = [], [], []
+            with torch.no_grad():
+                for obj in vobjs:
+                    _, pts, nrms, params = forward_object(net, obj, n_u=e_nu)
+                    mets = evaluate_surface(pts, obj["gt_pts"], nrms,
+                                            obj["gt_normals"])
+                    gR, gZ = tangent_field(obj["R"], obj["Z"], obj["RB"],
+                                           obj["RC"], obj["Bh"], obj["Th"],
+                                           params,
+                                           closed_top=obj.get("closed_top", True))
+                    vs.append(mets["chamfer_l2"]); hs.append(mets["hausdorff"])
+                    c1s.append(c1_diagnostic(gR, gZ)["global_min"])
+            v_cd, v_h, v_c1 = float(np.mean(vs)), float(np.mean(hs)), float(np.min(c1s))
+            row = [epoch, tot / nb, totc / nb, v_cd, v_h, v_c1, time.time() - t0]
+            logger.writerow(row); logf.flush()
+            tag = "  <-- CLASSICAL BASELINE" if epoch == 0 else ""
+            print(f"ep {epoch:3d} | loss {row[1]:.5f} | val CD {v_cd:.6f} "
+                  f"| val H {v_h:.4f} | C1min {v_c1:.3f} "
+                  f"| {row[6]:.1f}s{tag}")
+            if epoch > 0 and v_cd < best:
+                best = v_cd; bad = 0
+                torch.save(net.state_dict(), os.path.join(out_dir, "best.pt"))
+            elif epoch > 0:
+                bad += val_every
+                if patience > 0 and bad >= patience:
+                    print(f"early stop: no val improvement in {bad} epochs "
+                          f"(best val CD {best:.6f})")
+                    break
+        else:
+            print(f"ep {epoch:3d} | loss {tot/nb:.5f} | "
+                  f"{time.time()-t0:.1f}s (no val)")
     logf.close()
     return net
