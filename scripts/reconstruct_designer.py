@@ -67,7 +67,7 @@ def render(S, path, title, hide_crown=False):
     print("wrote", path)
 
 
-def tto_leave_one_out(obj, n_u, iters=300, lr=1e-3, reg=0.0,
+def tto_leave_one_out(obj, n_u, iters=300, lr=1e-3, reg=0.0, lam_prox=1e-2,
                       init_net=None, device="cpu", dtype=torch.float64):
     """Test-time optimization, leave-one-slice-out, with NO ground truth:
     hold out each interior contour in turn, reconstruct from the rest, and
@@ -130,12 +130,19 @@ def tto_leave_one_out(obj, n_u, iters=300, lr=1e-3, reg=0.0,
     for it in range(iters):
         opt.zero_grad()
         loss = 0.0
+        prox = 0.0
         for i in interior:
             keep = [k for k in range(N) if k != i]
             sub = {**obj, "R": obj["R"][keep], "Z": obj["Z"][keep]}
             feats = contour_features(sub["R"], sub["Z"], obj["RB"],
                                      obj["RC"], obj["Bh"], obj["Th"])
             params = net(feats)
+            # The leave-one-out objective NEVER constrains the base or crown
+            # cap (no fold targets them), so their scalings receive zero data
+            # signal. Freeze them at classical rather than let them drift.
+            params = {**params,
+                      "s_fB": torch.zeros_like(params["s_fB"]),
+                      "s_fC": torch.zeros_like(params["s_fC"])}
             S = surf(sub, params, n_u)
             # Compare against the GAP PATCH ONLY, not the whole surface.
             # Patch order is [base cap, interior 1..Nsub-1, crown cap], and
@@ -149,6 +156,15 @@ def tto_leave_one_out(obj, n_u, iters=300, lr=1e-3, reg=0.0,
             gap_patch = S[i].reshape(-1, 3)
             d_t2p, _ = _nn_sqdist(Z3(i), gap_patch)
             loss = loss + d_t2p.mean()
+            prox = prox + sum((params[k] ** 2).mean()
+                              for k in ("s_a", "s_b", "s_tau"))
+        # Proximity-to-classical anchor. This is what keeps the UNSUPERVISED
+        # regions (both caps always; also interior(0,1) on the vase, whose
+        # only fold is the degenerate skipped one) at the classical solution
+        # instead of drifting wherever the shared network weights happen to
+        # take them -- the cause of the exploding cap cones. Supervised
+        # regions still move freely, since the data term dominates there.
+        loss = loss + lam_prox * prox
         loss.backward()
         torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
         opt.step()
@@ -160,6 +176,16 @@ def tto_leave_one_out(obj, n_u, iters=300, lr=1e-3, reg=0.0,
         feats = contour_features(obj["R"], obj["Z"], obj["RB"], obj["RC"],
                                  obj["Bh"], obj["Th"])
         params = {k: v.detach() for k, v in net(feats).items()}
+        # caps unsupervised by this objective -> keep them classical
+        params["s_fB"] = torch.zeros_like(params["s_fB"])
+        params["s_fC"] = torch.zeros_like(params["s_fC"])
+    # Diagnostics: s is bounded to +-2 (=> tangent weights within e^{+-2}).
+    # Values pinned near +-2, especially on rows the folds never supervise,
+    # mean the anchor is too weak -- raise --tto_prox.
+    print("  tto parameter magnitudes (|s| max per row, bound = 2.0):")
+    for k in ("s_a", "s_b", "s_tau"):
+        per_row = params[k].abs().max(dim=1).values.cpu().numpy()
+        print(f"    {k:6s} " + " ".join(f"{v:.2f}" for v in per_row))
     return params
 
 
@@ -179,6 +205,9 @@ def main():
                          "training-data-free (fair vs per-shape methods)")
     ap.add_argument("--tto_iters", type=int, default=300)
     ap.add_argument("--tto_lr", type=float, default=1e-3)
+    ap.add_argument("--tto_prox", type=float, default=1e-2,
+                    help="anchor toward the classical solution; raise if "
+                         "unsupervised regions (caps) distort")
     ap.add_argument("--out", default="results/designer")
     ap.add_argument("--show_crown", action="store_true",
                     help="also draw the vase's crown patch (hidden by "
@@ -207,8 +236,8 @@ def main():
             sd = torch.load(a.ckpt, map_location=dev)
             init_sd = {k: v.to(dtype=dt) for k, v in sd.items()}
         params = tto_leave_one_out(obj, a.n_u, iters=a.tto_iters,
-                                   lr=a.tto_lr, init_net=init_sd,
-                                   device=dev, dtype=dt)
+                                   lr=a.tto_lr, lam_prox=a.tto_prox,
+                                   init_net=init_sd, device=dev, dtype=dt)
 
     S = surf(obj, params, a.n_u)
     hide_crown = pre.get("hide_crown_render", False) and not a.show_crown

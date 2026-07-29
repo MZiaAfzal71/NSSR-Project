@@ -431,3 +431,52 @@ folds) because its slices are very unevenly spaced. That is worth
 mentioning as a property of test-time optimization on irregular
 cross-sectional data -- it is exactly the regime where the self-supervised
 signal is weakest.
+
+## TTO fix #5: the caps are NEVER constrained by leave-one-out
+
+The decisive finding, obtained by enumerating which full-object patches the
+objective actually touches:
+
+```
+vase (N=9) usable folds=[2,3,4,5,6,7]
+   base_cap           *** NEVER CONSTRAINED ***
+   interior(0,1)      *** NEVER CONSTRAINED ***   (its only fold is the
+                                                   skipped degenerate one)
+   interior(1,2) ... interior(7,8)   supervised
+   crown_cap          *** NEVER CONSTRAINED ***
+```
+
+No leave-one-out fold ever targets a cap -- folds only ever supervise
+interior gap patches. In fix #3 the regularizer was also set to zero, so
+NOTHING anchored the cap outputs: the shared network weights were pushed
+hard by the interior folds, and the cap predictions drifted wherever those
+weights happened to take them. That is the exploding cone -- it was never
+being optimized toward anything, it was unconstrained drift. The vase is
+the worst case because it loses `interior(0,1)` as well (its only fold is
+the degenerate skipped one), giving it TWO unconstrained regions.
+
+Two fixes:
+1. **Freeze the cap scalings** (`s_fB`, `s_fC`) at classical during tto.
+   They receive literally zero data signal from this objective, so there
+   is nothing to learn and everything to lose by letting them move.
+2. **Proximity-to-classical anchor** (`--tto_prox`, default 1e-2) on the
+   predicted `s_a`/`s_b`/`s_tau`. Supervised regions still move freely --
+   the data term dominates there -- while unsupervised regions stay at the
+   classical solution instead of drifting.
+
+Also added: tto now prints per-row `|s|` magnitudes at the end. `s` is
+bounded to +-2 (tangent weights within e^{+-2}); values pinned near 2.0,
+especially on rows the folds never supervise, mean the anchor is too weak
+and `--tto_prox` should be raised. Please paste this diagnostic if the
+distortion persists -- it localizes the problem to specific rows.
+
+### Conceptual note for the paper
+
+This is worth stating explicitly in the method section: leave-one-out
+self-supervision constrains ONLY the interior interpolation, because caps
+have no held-out ring to be validated against. Test-time optimization can
+therefore improve interior fidelity but cannot, even in principle, learn
+anything about cap behaviour without ground truth. That is a real and
+honest limitation of the training-data-free mode, and a clean argument for
+why the trained-network mode (which learns cap behaviour from the
+synthetic corpus) is the stronger operating point.
