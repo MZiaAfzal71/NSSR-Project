@@ -107,9 +107,26 @@ def tto_leave_one_out(obj, n_u, iters=300, lr=1e-3, reg=0.0,
         net.load_state_dict(init_net)
     net.train()
     opt = torch.optim.Adam(net.parameters(), lr=lr, weight_decay=reg)
-    interior = list(range(1, N - 1))
     Z3 = lambda i: torch.cat([obj["R"][i],
                               obj["Z"][i].expand(m, 1)], dim=1)
+
+    # Which folds are usable? Removing row i leaves rows i-1 and i+1
+    # adjacent; if they sit at (nearly) the same height the resulting gap
+    # patch has ~zero vertical extent and cannot pass through the held-out
+    # ring at all -- an unsatisfiable fold that only injects large
+    # gradients. The vase has exactly this case (rows 0 and 2 are both at
+    # the same height, straddling its flat base ring), so skip such folds.
+    Zc = obj["Z"].detach().cpu().numpy()
+    span = float(abs(Zc.max() - Zc.min())) or 1.0
+    interior = [i for i in range(1, N - 1)
+                if abs(float(Zc[i + 1] - Zc[i - 1])) > 1e-3 * span]
+    skipped = [i for i in range(1, N - 1) if i not in interior]
+    if skipped:
+        print(f"  tto: skipping degenerate fold(s) {skipped} "
+              f"(rows either side sit at the same height)")
+    if not interior:
+        raise RuntimeError("no usable leave-one-out folds for this object")
+
     for it in range(iters):
         opt.zero_grad()
         loss = 0.0
@@ -120,7 +137,17 @@ def tto_leave_one_out(obj, n_u, iters=300, lr=1e-3, reg=0.0,
                                      obj["RC"], obj["Bh"], obj["Th"])
             params = net(feats)
             S = surf(sub, params, n_u)
-            d_t2p, _ = _nn_sqdist(Z3(i), surface_points(S))
+            # Compare against the GAP PATCH ONLY, not the whole surface.
+            # Patch order is [base cap, interior 1..Nsub-1, crown cap], and
+            # interior patch k spans subset rows k-1,k; removing row i makes
+            # original rows i-1,i+1 into subset rows i-1,i, so the patch
+            # that must interpolate the held-out ring is at list index i.
+            # Searching the WHOLE surface instead lets the optimizer cheat
+            # by ballooning a CAP through the target ring (verified: for the
+            # vase's i=7 fold the nearest patch is the crown cap, not the
+            # gap patch) -- low loss, destroyed shape.
+            gap_patch = S[i].reshape(-1, 3)
+            d_t2p, _ = _nn_sqdist(Z3(i), gap_patch)
             loss = loss + d_t2p.mean()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)

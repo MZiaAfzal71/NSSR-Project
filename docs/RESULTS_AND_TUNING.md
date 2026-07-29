@@ -390,3 +390,44 @@ python scripts/reconstruct_designer.py --ds apple --mode tto \
 Both are worth reporting in the paper: the first shows how much a few
 per-object steps add on top of a trained model; the second is the
 strongest answer to "where does training data come from in practice?".
+
+## TTO fix #4: the loss could be satisfied by the WRONG patch
+
+After fix #3 (optimize a geometry-conditioned function, not per-row
+numbers), the apple's tto result became essentially correct, but the vase
+was still badly distorted -- huge flared cones at both ends -- in BOTH
+`--tto_init net` and `--tto_init classical`. Two further causes, both
+verified numerically rather than guessed:
+
+**(a) Cap-cheating.** The one-sided loss searched the ENTIRE reconstructed
+surface for each held-out ring point's nearest neighbour. Checked directly:
+for the vase's i=7 fold, the nearest patch to the held-out ring is the
+CROWN CAP (patch 8), not the gap patch that should be interpolating it. So
+the optimizer could lower the loss by ballooning a cap outward until it
+swept through the target ring -- low loss, destroyed shape. Same class of
+degeneracy as the original collapse bug, in the opposite direction.
+
+Fixed: the loss now targets ONLY the gap patch -- the single patch that
+actually spans the hole left by the removed row. Patch order is
+`[base cap, interior 1..Nsub-1, crown cap]` and interior patch k spans
+subset rows k-1,k; removing row i makes original rows i-1,i+1 into subset
+rows i-1,i, so the required patch is at list index i (verified empirically
+for all three shapes). Caps are now excluded from the loss entirely and
+cannot be exploited.
+
+**(b) An unsatisfiable fold.** Removing the vase's row 1 leaves rows 0 and
+2 at IDENTICAL height (both -1.104, straddling its flat base ring -- the
+duplicate-height quirk that also caused the earlier NaN). The resulting gap
+patch has zero vertical extent but is asked to pass through a ring at
+z=-1.186, BELOW both -- geometrically impossible, so the fold contributed
+nothing but large gradients. Fixed: folds whose neighbouring rows sit at
+(near-)identical heights are detected and skipped, with a printed notice.
+For the vase this skips exactly fold 1 and keeps folds 2-7; banana and
+apple skip nothing.
+
+Note for the paper: the leave-one-out fold quality varies a lot on the
+vase (gap-patch distance at classical init ranges 0.004 to 0.285 across
+folds) because its slices are very unevenly spaced. That is worth
+mentioning as a property of test-time optimization on irregular
+cross-sectional data -- it is exactly the regime where the self-supervised
+signal is weakest.
