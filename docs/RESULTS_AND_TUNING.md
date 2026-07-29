@@ -342,3 +342,51 @@ ability to represent circumferential noise at all, rather than merely
 discouraging it. Also added gradient-norm clipping (matching the main
 training loop's practice), which the original tto optimizer lacked.
 Re-run `--mode tto` for all three shapes after pulling this fix.
+
+## TTO fix #3 (the real one): optimize a FUNCTION, not per-row numbers
+
+Symptom: with `classical` and `net` both looking correct on all three
+designer shapes, `--mode tto` still badly distorted the apple and vase
+(exploded caps, displaced rings) while the banana looked fine -- and the
+reported loss was low throughout.
+
+Root cause (a design flaw in the tto formulation, not a coding slip):
+the optimized parameters were indexed BY ROW (`s_a[i]`, one knob per
+contour). Every leave-one-out fold removes a row, so the surviving rows
+sit across LARGER vertical gaps than they do in the real object. The
+optimizer therefore tuned each row's tangent scaling to be correct for
+those widened gaps -- then the final render applied those same numbers to
+the FULL object, where the gaps are back to normal, so the tangents
+systematically overshoot.
+
+Why the banana was fine and the other two were not: the banana has 7 rows,
+smooth and monotonic in Z, so removing one row barely changes local
+geometry. The apple and vase both have NON-MONOTONIC Z with tightly-spaced
+rows, where dropping a row changes the local configuration drastically --
+so the subset-vs-full mismatch is severe exactly there. (An earlier
+hypothesis -- per-point circumferential noise -- was wrong; restricting
+the parameters to one scalar per row did not fix it, which is what pointed
+at the row-indexing itself.)
+
+Fix: tto now optimizes the WEIGHTS OF A ParamNet -- a function from local
+geometry to tangent corrections -- instead of free per-row numbers. A
+geometry-conditioned function is evaluated on whatever configuration it is
+handed, so the subset folds and the final full-object evaluation stay
+coherent. This is precisely why `--mode net` transfers cleanly, and tto
+now inherits that property.
+
+Two operating modes:
+```bash
+# per-object fine-tune of the trained checkpoint (default, usually best)
+python scripts/reconstruct_designer.py --ds apple --mode tto \
+    --ckpt runs/exp_v2/best.pt --tto_init net
+
+# fully training-data-free: starts from the classical pipeline, uses no
+# ground truth and no training set at all -- the fair comparison against
+# per-shape methods like OReX
+python scripts/reconstruct_designer.py --ds apple --mode tto \
+    --tto_init classical
+```
+Both are worth reporting in the paper: the first shows how much a few
+per-object steps add on top of a trained model; the second is the
+strongest answer to "where does training data come from in practice?".

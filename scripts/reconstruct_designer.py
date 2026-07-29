@@ -67,42 +67,46 @@ def render(S, path, title, hide_crown=False):
     print("wrote", path)
 
 
-def tto_leave_one_out(obj, n_u, iters=400, lr=3e-2, reg=1e-3):
-    """Optimize s-fields so that, with each interior slice held out in turn,
-    the surface built from the remaining slices passes through it.
+def tto_leave_one_out(obj, n_u, iters=300, lr=1e-3, reg=0.0,
+                      init_net=None, device="cpu", dtype=torch.float64):
+    """Test-time optimization, leave-one-slice-out, with NO ground truth:
+    hold out each interior contour in turn, reconstruct from the rest, and
+    require the surface to pass through the held-out ring.
 
-    Loss note: uses a ONE-SIDED distance -- for each point on the held-out
-    ring, distance to its nearest neighbour on the (much larger) full
-    reconstructed surface. An earlier version used the standard two-sided
-    Chamfer distance here, but that also penalizes every point on the FULL
-    surface (including the opposite cap) for being far from the one small
-    target ring; summed over every leave-one-out fold, that pressure is
-    minimized by shrinking the whole shape toward the interior -- observed
-    as both caps collapsing into a point (a real bug, not a shape-preserving
-    quirk of the method). The one-sided distance only asks "does the
-    reconstruction pass near this ring", with no penalty on the rest of the
-    surface, and does not exhibit the collapse.
+    What is optimized: the WEIGHTS OF A ParamNet, i.e. a function mapping
+    local geometry -> tangent corrections. NOT free per-row numbers.
 
-    Parameterization note: s_a/s_b/s_tau are ONE SCALAR PER ROW (broadcast
-    uniformly around the ring), not one value per individual point. An
-    earlier version gave every point its own free parameter with only an
-    L2-to-zero pull; since each leave-one-out fold supervises against a
-    single ring (nowhere near enough signal to justify point-by-point
-    freedom), that produced self-intersecting "loops" on the caps (worst on
-    the apple, whose non-circular cap formula amplifies per-point tangent
-    noise directly) and zigzag waviness on interior rows (mild on the
-    banana). A per-row scalar removes this failure mode structurally,
-    rather than merely discouraging it with a smoothness penalty -- there
-    is no way to represent circumferential noise at all. s_fB/s_fC
-    (circular-cap-only, unused by the apple) are likewise per-object
-    scalars."""
+    Why this matters (this was a real design flaw in an earlier version):
+    with per-row parameters (s_a[i] etc.), every fold removes a row, so the
+    surviving rows sit across LARGER vertical gaps than in the real object.
+    The optimizer therefore tuned each row's tangent scaling to be correct
+    for those widened gaps -- and the final render applies those same
+    numbers to the FULL object, where the gaps are back to normal, so the
+    tangents systematically overshoot. On the banana (7 rows, smooth,
+    monotonic Z) the mismatch is mild and the result looked fine; on the
+    apple and vase (non-monotonic Z, tightly-spaced rows, so removing a row
+    changes local geometry a lot) it was severe -- exploded caps and
+    displaced rings. A geometry-CONDITIONED function does not have this
+    problem: it is evaluated on whatever configuration it is given, so the
+    subset folds and the final full-object evaluation stay coherent. This
+    is also exactly why '--mode net' transfers cleanly.
+
+    Loss note: ONE-SIDED distance (held-out ring -> reconstructed surface).
+    A two-sided Chamfer here also penalizes the whole surface for being far
+    from the one small target ring, which collapses both caps inward.
+
+    init_net: optional state_dict. Starting from the trained checkpoint
+    makes this a per-object FINE-TUNE (usually best); starting from scratch
+    (zero-initialized head => exactly classical) makes it fully
+    training-data-free, which is the fair comparison against per-shape
+    methods like OReX.
+    """
     N, m = obj["R"].shape[0], obj["R"].shape[1]
-    dev, dt = obj["R"].device, obj["R"].dtype
-    raw = {k: torch.zeros(N, 1, device=dev, dtype=dt, requires_grad=True)
-           for k in ("s_a", "s_b", "s_tau")}
-    rawB = torch.zeros((), device=dev, dtype=dt, requires_grad=True)
-    rawC = torch.zeros((), device=dev, dtype=dt, requires_grad=True)
-    opt = torch.optim.Adam(list(raw.values()) + [rawB, rawC], lr=lr)
+    net = ParamNet().to(device=device, dtype=dtype)
+    if init_net is not None:
+        net.load_state_dict(init_net)
+    net.train()
+    opt = torch.optim.Adam(net.parameters(), lr=lr, weight_decay=reg)
     interior = list(range(1, N - 1))
     Z3 = lambda i: torch.cat([obj["R"][i],
                               obj["Z"][i].expand(m, 1)], dim=1)
@@ -111,30 +115,24 @@ def tto_leave_one_out(obj, n_u, iters=400, lr=3e-2, reg=1e-3):
         loss = 0.0
         for i in interior:
             keep = [k for k in range(N) if k != i]
-            sub = {**obj,
-                   "R": obj["R"][keep], "Z": obj["Z"][keep]}
-            params = {"s_a": (2*torch.tanh(raw["s_a"][keep])).expand(-1, m),
-                      "s_b": (2*torch.tanh(raw["s_b"][keep])).expand(-1, m),
-                      "s_tau": (2*torch.tanh(raw["s_tau"][keep])).expand(-1, m),
-                      "s_fB": (2*torch.tanh(rawB)).expand(m),
-                      "s_fC": (2*torch.tanh(rawC)).expand(m)}
+            sub = {**obj, "R": obj["R"][keep], "Z": obj["Z"][keep]}
+            feats = contour_features(sub["R"], sub["Z"], obj["RB"],
+                                     obj["RC"], obj["Bh"], obj["Th"])
+            params = net(feats)
             S = surf(sub, params, n_u)
-            pred = surface_points(S)
-            target = Z3(i)
-            d_t2p, _ = _nn_sqdist(target, pred)   # ring -> surface only
+            d_t2p, _ = _nn_sqdist(Z3(i), surface_points(S))
             loss = loss + d_t2p.mean()
-        for v in list(raw.values()) + [rawB, rawC]:
-            loss = loss + reg * (v ** 2).mean()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(list(raw.values()) + [rawB, rawC], 1.0)
+        torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
         opt.step()
         if it % 50 == 0:
             print(f"  tto iter {it}: loss {loss.item():.6f}")
-    params = {"s_a": (2*torch.tanh(raw["s_a"])).expand(-1, m).detach(),
-              "s_b": (2*torch.tanh(raw["s_b"])).expand(-1, m).detach(),
-              "s_tau": (2*torch.tanh(raw["s_tau"])).expand(-1, m).detach(),
-              "s_fB": (2*torch.tanh(rawB)).expand(m).detach(),
-              "s_fC": (2*torch.tanh(rawC)).expand(m).detach()}
+    # final parameters: evaluate the tuned function on the FULL object
+    net.eval()
+    with torch.no_grad():
+        feats = contour_features(obj["R"], obj["Z"], obj["RB"], obj["RC"],
+                                 obj["Bh"], obj["Th"])
+        params = {k: v.detach() for k, v in net(feats).items()}
     return params
 
 
@@ -147,6 +145,13 @@ def main():
     ap.add_argument("--ckpt", default="runs/exp1/best.pt")
     ap.add_argument("--n1", type=int, default=25)
     ap.add_argument("--n_u", type=int, default=40)
+    ap.add_argument("--tto_init", default="net", choices=["net", "classical"],
+                    help="'net' = per-object fine-tune of the trained "
+                         "checkpoint (usually best); 'classical' = start "
+                         "from the classical pipeline, fully "
+                         "training-data-free (fair vs per-shape methods)")
+    ap.add_argument("--tto_iters", type=int, default=300)
+    ap.add_argument("--tto_lr", type=float, default=1e-3)
     ap.add_argument("--out", default="results/designer")
     ap.add_argument("--show_crown", action="store_true",
                     help="also draw the vase's crown patch (hidden by "
@@ -170,7 +175,13 @@ def main():
             params = net(contour_features(obj["R"], obj["Z"], obj["RB"],
                                           obj["RC"], obj["Bh"], obj["Th"]))
     else:
-        params = tto_leave_one_out(obj, a.n_u)
+        init_sd = None
+        if a.tto_init == "net":
+            sd = torch.load(a.ckpt, map_location=dev)
+            init_sd = {k: v.to(dtype=dt) for k, v in sd.items()}
+        params = tto_leave_one_out(obj, a.n_u, iters=a.tto_iters,
+                                   lr=a.tto_lr, init_net=init_sd,
+                                   device=dev, dtype=dt)
 
     S = surf(obj, params, a.n_u)
     hide_crown = pre.get("hide_crown_render", False) and not a.show_crown
