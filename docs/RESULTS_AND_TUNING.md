@@ -314,3 +314,31 @@ Start with a small batch (10-20 meshes) through `make_mesh_dataset.py` to
 confirm the rejection rate is reasonable before committing to a larger
 scrape -- genus-0/single-loop-per-slice is a real constraint and it's
 better to learn the yield early.
+
+## TTO fix #2: per-point noise causing self-intersecting "loops"
+
+After fixing the collapse bug (one-sided loss), a DIFFERENT artifact
+appeared: self-intersecting loops on the apple's caps and mild zigzag
+waviness on the banana's interior, while the reported loss stayed low in
+both cases (the loss doesn't penalize this at all, which is exactly why
+it wasn't caught by the numbers).
+
+Root cause: `tto_leave_one_out` gave every individual point around every
+ring its own free parameter (a full `(N, m)` tensor per field: s_a, s_b,
+s_tau), with only a weak L2-to-zero pull and no coupling between
+neighbouring points. The network-based ("net") mode never has this
+problem because the circular-conv architecture structurally forces nearby
+points to behave similarly; tto's raw per-point tensors have no such
+inductive bias, and with 400 optimization steps individual columns can
+drift independently. Each leave-one-out fold only supervises against ONE
+ring at a time -- nowhere near enough signal to justify point-by-point
+independent freedom within a ring, so the extra degrees of freedom were
+pure overfitting surface.
+
+Fixed structurally, not with a stronger regularizer: s_a/s_b/s_tau are now
+ONE SCALAR PER ROW (broadcast uniformly around the ring, `(N, 1)` instead
+of `(N, m)`), and s_fB/s_fC are one scalar per object. This removes the
+ability to represent circumferential noise at all, rather than merely
+discouraging it. Also added gradient-norm clipping (matching the main
+training loop's practice), which the original tto optimizer lacked.
+Re-run `--mode tto` for all three shapes after pulling this fix.

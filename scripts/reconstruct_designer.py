@@ -81,13 +81,27 @@ def tto_leave_one_out(obj, n_u, iters=400, lr=3e-2, reg=1e-3):
     as both caps collapsing into a point (a real bug, not a shape-preserving
     quirk of the method). The one-sided distance only asks "does the
     reconstruction pass near this ring", with no penalty on the rest of the
-    surface, and does not exhibit the collapse."""
+    surface, and does not exhibit the collapse.
+
+    Parameterization note: s_a/s_b/s_tau are ONE SCALAR PER ROW (broadcast
+    uniformly around the ring), not one value per individual point. An
+    earlier version gave every point its own free parameter with only an
+    L2-to-zero pull; since each leave-one-out fold supervises against a
+    single ring (nowhere near enough signal to justify point-by-point
+    freedom), that produced self-intersecting "loops" on the caps (worst on
+    the apple, whose non-circular cap formula amplifies per-point tangent
+    noise directly) and zigzag waviness on interior rows (mild on the
+    banana). A per-row scalar removes this failure mode structurally,
+    rather than merely discouraging it with a smoothness penalty -- there
+    is no way to represent circumferential noise at all. s_fB/s_fC
+    (circular-cap-only, unused by the apple) are likewise per-object
+    scalars."""
     N, m = obj["R"].shape[0], obj["R"].shape[1]
     dev, dt = obj["R"].device, obj["R"].dtype
-    raw = {k: torch.zeros(N, m, device=dev, dtype=dt, requires_grad=True)
+    raw = {k: torch.zeros(N, 1, device=dev, dtype=dt, requires_grad=True)
            for k in ("s_a", "s_b", "s_tau")}
-    rawB = torch.zeros(m, device=dev, dtype=dt, requires_grad=True)
-    rawC = torch.zeros(m, device=dev, dtype=dt, requires_grad=True)
+    rawB = torch.zeros((), device=dev, dtype=dt, requires_grad=True)
+    rawC = torch.zeros((), device=dev, dtype=dt, requires_grad=True)
     opt = torch.optim.Adam(list(raw.values()) + [rawB, rawC], lr=lr)
     interior = list(range(1, N - 1))
     Z3 = lambda i: torch.cat([obj["R"][i],
@@ -99,11 +113,11 @@ def tto_leave_one_out(obj, n_u, iters=400, lr=3e-2, reg=1e-3):
             keep = [k for k in range(N) if k != i]
             sub = {**obj,
                    "R": obj["R"][keep], "Z": obj["Z"][keep]}
-            params = {"s_a": 2*torch.tanh(raw["s_a"][keep]),
-                      "s_b": 2*torch.tanh(raw["s_b"][keep]),
-                      "s_tau": 2*torch.tanh(raw["s_tau"][keep]),
-                      "s_fB": 2*torch.tanh(rawB),
-                      "s_fC": 2*torch.tanh(rawC)}
+            params = {"s_a": (2*torch.tanh(raw["s_a"][keep])).expand(-1, m),
+                      "s_b": (2*torch.tanh(raw["s_b"][keep])).expand(-1, m),
+                      "s_tau": (2*torch.tanh(raw["s_tau"][keep])).expand(-1, m),
+                      "s_fB": (2*torch.tanh(rawB)).expand(m),
+                      "s_fC": (2*torch.tanh(rawC)).expand(m)}
             S = surf(sub, params, n_u)
             pred = surface_points(S)
             target = Z3(i)
@@ -111,14 +125,16 @@ def tto_leave_one_out(obj, n_u, iters=400, lr=3e-2, reg=1e-3):
             loss = loss + d_t2p.mean()
         for v in list(raw.values()) + [rawB, rawC]:
             loss = loss + reg * (v ** 2).mean()
-        loss.backward(); opt.step()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(list(raw.values()) + [rawB, rawC], 1.0)
+        opt.step()
         if it % 50 == 0:
             print(f"  tto iter {it}: loss {loss.item():.6f}")
-    params = {"s_a": 2*torch.tanh(raw["s_a"]).detach(),
-              "s_b": 2*torch.tanh(raw["s_b"]).detach(),
-              "s_tau": 2*torch.tanh(raw["s_tau"]).detach(),
-              "s_fB": 2*torch.tanh(rawB).detach(),
-              "s_fC": 2*torch.tanh(rawC).detach()}
+    params = {"s_a": (2*torch.tanh(raw["s_a"])).expand(-1, m).detach(),
+              "s_b": (2*torch.tanh(raw["s_b"])).expand(-1, m).detach(),
+              "s_tau": (2*torch.tanh(raw["s_tau"])).expand(-1, m).detach(),
+              "s_fB": (2*torch.tanh(rawB)).expand(m).detach(),
+              "s_fC": (2*torch.tanh(rawC)).expand(m).detach()}
     return params
 
 
