@@ -76,17 +76,16 @@ def main():
         kept, rejected = [], {}
         for p in paths:
             try:
-                s = make_sample_from_mesh(p, N=N,
-                                          base_circular=a.base_circular,
-                                          crown_circular=a.crown_circular)
+                s, reason = make_sample_from_mesh(
+                    p, N=N, base_circular=a.base_circular,
+                    crown_circular=a.crown_circular)
             except Exception as e:                     # noqa: BLE001
-                rejected.setdefault(f"exception: {type(e).__name__}",
+                rejected.setdefault(f"{type(e).__name__}: {e}"[:70],
                                     []).append(p)
                 continue
             if s is None:
-                rejected.setdefault(
-                    "not watertight or slice not a single closed loop",
-                    []).append(p)
+                # normalize "... at z=0.123" variants into one bucket
+                rejected.setdefault(reason.split(" at ")[0], []).append(p)
                 continue
             kept.append(s)
 

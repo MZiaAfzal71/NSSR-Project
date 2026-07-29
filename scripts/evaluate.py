@@ -53,11 +53,24 @@ def main():
     with open(a.out, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=rows[0].keys())
         w.writeheader(); w.writerows(rows)
-    for key in ("chamfer_l2", "chamfer_l1", "hausdorff", "normal_consistency"):
+    # NOTE: chamfer/hausdorff are LOWER-is-better; normal_consistency is
+    # HIGHER-is-better (mean |cos| between normals, 1.0 = perfect). Using
+    # one formula for both silently prints the normals row backwards.
+    HIGHER_IS_BETTER = {"normal_consistency"}
+    for key in ("chamfer_l2", "chamfer_l1", "hausdorff", "hausdorff95",
+                "normal_consistency"):
+        if f"classical_{key}" not in rows[0]:
+            continue
         c = np.mean([r[f"classical_{key}"] for r in rows])
         l = np.mean([r[f"learned_{key}"] for r in rows])
+        if key in HIGHER_IS_BETTER:
+            imp = 100 * (l - c) / max(abs(c), 1e-12)
+            direction = "(higher is better)"
+        else:
+            imp = 100 * (c - l) / max(abs(c), 1e-12)
+            direction = "(lower is better)"
         print(f"{key:20s} classical {c:.6f}   learned {l:.6f}   "
-              f"improvement {100*(c-l)/max(c,1e-12):+.1f}%")
+              f"improvement {imp:+.1f}%  {direction}")
     print("min C1 diagnostic over test set:",
           min(r["learned_c1_min"] for r in rows))
     print("wrote", a.out)
