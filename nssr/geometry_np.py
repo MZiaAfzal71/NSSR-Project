@@ -69,17 +69,22 @@ def boundary_directions_np(R, Z, RB, RC, Bh, Th, at_base=True, eps=1e-8):
     N, m, _ = R.shape
     j = np.arange(m)
     a1 = 1.0 + (j % 15)
+    tiny = 1e-9
     if at_base:
         B, C = R[0], R[1]
-        b1 = (Bh - a1 * (Z[0] - Bh)) / (Z[1] - Z[0])
-        b2 = (Bh + a1 * (Z[0] - Bh)) / (Z[1] - Z[0])
+        denom = Z[1] - Z[0]
+        denom = tiny if abs(denom) < tiny else denom
+        b1 = (Bh - a1 * (Z[0] - Bh)) / denom
+        b2 = (Bh + a1 * (Z[0] - Bh)) / denom
         BA = B - RB
         CB = C - B
         E = BA / _nrm(BA)
     else:
         A, B = R[N - 2], R[N - 1]
-        b1 = (Th - a1 * (Z[N - 1] - Z[N - 2])) / (Th - Z[N - 1])
-        b2 = (Th + a1 * (Z[N - 1] - Z[N - 2])) / (Th - Z[N - 1])
+        denom = Th - Z[N - 1]
+        denom = tiny if abs(denom) < tiny else denom
+        b1 = (Th - a1 * (Z[N - 1] - Z[N - 2])) / denom
+        b2 = (Th + a1 * (Z[N - 1] - Z[N - 2])) / denom
         BA = B - A
         CB = RC - B
         E = CB / _nrm(CB)

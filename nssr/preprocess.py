@@ -171,8 +171,12 @@ def _normalize(R, Z, RB, RC, Bh, Th):
 
 def preprocess_object(raw_contours, Z, m: int = 256, null_hts=None,
                       base_circular=True, crown_circular=True,
-                      use_null_hts_directly=False) -> dict:
-    """Generic path: raw slice contours -> everything geometry.py needs."""
+                      closed_top=True, use_null_hts_directly=False) -> dict:
+    """Generic path: raw slice contours -> everything geometry.py needs.
+    closed_top=False means no crown contour exists at all (e.g. a
+    genuinely open real-world scan, or the synthetic open_top family);
+    Th/RC are still computed for internal consistency but never used
+    downstream when closed_top is False."""
     Z = np.asarray(Z, dtype=np.float64)
     contours = [resample_contour(C, m) for C in raw_contours]
     R = align_contours(contours)
@@ -185,6 +189,7 @@ def preprocess_object(raw_contours, Z, m: int = 256, null_hts=None,
     out = _normalize(R, Z, RB, RC, Bh, Th)
     out["base_circular"] = base_circular
     out["crown_circular"] = crown_circular
+    out["closed_top"] = closed_top
     return out
 
 
@@ -222,5 +227,14 @@ def preprocess_designer(ds: str = "banana", n1: int = 25) -> dict:
                      float(Bh), float(Th))
     out["base_circular"] = circ
     out["crown_circular"] = circ
-    out["closed_top"] = (ds != "vase")        # vase top is open
+    out["closed_top"] = True    # ALWAYS compute the crown patch: verified
+    # (tests/parity_check.py) that the reference implementation computes a
+    # full circular crown patch for the vase identically to the base -- the
+    # paper's Figure 1c simply does not DRAW it (reconstruct_python_loops_
+    # cpu.py's vase wireframe loop stops at shape[0]-1). Treating the crown
+    # as computationally absent, as an earlier version of this file did, is
+    # a real accuracy loss, not a cosmetic one. Use hide_crown_render below
+    # to reproduce the paper's figure; the underlying surface always
+    # includes the crown.
+    out["hide_crown_render"] = (ds == "vase")
     return out

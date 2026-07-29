@@ -62,7 +62,15 @@ def ground_truth_sample(mesh, n=60000):
     return np.asarray(pts), np.asarray(normals)
 
 
-def make_sample_from_mesh(path: str, N=7):
+def make_sample_from_mesh(path: str, N=7, base_circular=True,
+                          crown_circular=True):
+    """Real-mesh sample, closed_top=True (both ends come from margin-offset
+    slices of a watertight mesh, so a real crown ring always exists --
+    unlike the synthetic open_top family, which has no crown data at all).
+    base_circular/crown_circular default to the more expressive circular-
+    cap formula; pass False to match the apple's non-circular convention
+    if that fits your data better (no way to know a priori for real data,
+    so this is exposed as a script option, not inferred)."""
     mesh = load_and_normalize(path)
     sl = slice_mesh(mesh, N=N)
     if sl is None:
@@ -70,4 +78,6 @@ def make_sample_from_mesh(path: str, N=7):
     contours, Z = sl
     gt_pts, gt_normals = ground_truth_sample(mesh)
     return {"contours": contours, "Z": Z,
-            "gt_pts": gt_pts, "gt_normals": gt_normals, "path": path}
+            "gt_pts": gt_pts, "gt_normals": gt_normals, "path": path,
+            "family": "mesh", "closed_top": True,
+            "base_circular": base_circular, "crown_circular": crown_circular}

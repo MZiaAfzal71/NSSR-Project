@@ -16,7 +16,10 @@ from .metrics import evaluate_surface, c1_diagnostic
 
 def to_torch(sample, m=256, device="cpu", dtype=torch.float32,
              gt_subsample=20000, seed=0):
-    pre = preprocess_object(sample["contours"], sample["Z"], m=m)
+    pre = preprocess_object(sample["contours"], sample["Z"], m=m,
+                            base_circular=sample.get("base_circular", True),
+                            crown_circular=sample.get("crown_circular", True),
+                            closed_top=sample.get("closed_top", True))
     T = lambda x: torch.as_tensor(np.asarray(x), device=device, dtype=dtype)
     g = np.random.default_rng(seed)
     q = sample["gt_pts"].shape[0]
@@ -28,9 +31,9 @@ def to_torch(sample, m=256, device="cpu", dtype=torch.float32,
     return {"R": T(pre["R"]), "Z": T(pre["Z"]), "RB": T(pre["RB"]),
             "RC": T(pre["RC"]), "Bh": T(pre["Bh"]), "Th": T(pre["Th"]),
             "gt_pts": T(gt), "gt_normals": T(sample["gt_normals"][idx]),
-            "base_circular": pre.get("base_circular", True),
-            "crown_circular": pre.get("crown_circular", True),
-            "closed_top": pre.get("closed_top", True)}
+            "base_circular": pre["base_circular"],
+            "crown_circular": pre["crown_circular"],
+            "closed_top": pre["closed_top"]}
 
 
 def forward_object(net, obj, n_u=24):

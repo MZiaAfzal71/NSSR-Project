@@ -121,15 +121,21 @@ def boundary_directions(R, Z, RB, RC, Bh, Th, at_base=True, eps=1e-8):
     a1 = 1.0 + torch.remainder(j, 15.0)
     if at_base:
         B, C = R[0], R[1]
-        b1 = (Bh - a1 * (Z[0] - Bh)) / (Z[1] - Z[0])
-        b2 = (Bh + a1 * (Z[0] - Bh)) / (Z[1] - Z[0])
+        denom = Z[1] - Z[0]
+        denom = torch.where(denom.abs() < EPS,
+                            torch.full_like(denom, EPS), denom)
+        b1 = (Bh - a1 * (Z[0] - Bh)) / denom
+        b2 = (Bh + a1 * (Z[0] - Bh)) / denom
         BA = B - RB
         CB = C - B
         E = BA / _norm(BA)
     else:
         A, B = R[N - 2], R[N - 1]
-        b1 = (Th - a1 * (Z[N - 1] - Z[N - 2])) / (Th - Z[N - 1])
-        b2 = (Th + a1 * (Z[N - 1] - Z[N - 2])) / (Th - Z[N - 1])
+        denom = Th - Z[N - 1]
+        denom = torch.where(denom.abs() < EPS,
+                            torch.full_like(denom, EPS), denom)
+        b1 = (Th - a1 * (Z[N - 1] - Z[N - 2])) / denom
+        b2 = (Th + a1 * (Z[N - 1] - Z[N - 2])) / denom
         BA = B - A
         CB = RC - B
         E = CB / _norm(CB)

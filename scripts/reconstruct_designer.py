@@ -27,7 +27,7 @@ import matplotlib.pyplot as plt
 from nssr.preprocess import preprocess_designer
 from nssr.geometry import hermite_surface, zero_params, surface_points
 from nssr.networks import ParamNet, contour_features
-from nssr.losses import chamfer
+from nssr.losses import chamfer, _nn_sqdist
 
 
 def load_designer(ds, n1, device, dtype):
@@ -48,11 +48,16 @@ def surf(obj, params, n_u):
                            crown_circular=obj["crown_circular"])
 
 
-def render(S, path, title):
+def render(S, path, title, hide_crown=False):
+    """hide_crown drops the LAST patch from the plot only (matching the
+    paper's Figure 1c convention for the vase); the underlying surface S
+    always includes the full, accurately-computed crown patch -- nothing
+    is removed from the reconstruction itself, only from this picture."""
     S = S.detach().cpu().numpy()
+    n_patches = S.shape[0] - 1 if hide_crown else S.shape[0]
     fig = plt.figure(figsize=(7, 7))
     ax = fig.add_subplot(111, projection="3d")
-    for p in range(S.shape[0]):
+    for p in range(n_patches):
         ax.plot_wireframe(S[p, :, :, 0], S[p, :, :, 1], S[p, :, :, 2],
                           rcount=10, ccount=24, linewidth=0.5, color="k")
     ax.axis("equal"); ax.axis("off"); ax.view_init(elev=12, azim=15)
@@ -64,7 +69,19 @@ def render(S, path, title):
 
 def tto_leave_one_out(obj, n_u, iters=400, lr=3e-2, reg=1e-3):
     """Optimize s-fields so that, with each interior slice held out in turn,
-    the surface built from the remaining slices passes through it."""
+    the surface built from the remaining slices passes through it.
+
+    Loss note: uses a ONE-SIDED distance -- for each point on the held-out
+    ring, distance to its nearest neighbour on the (much larger) full
+    reconstructed surface. An earlier version used the standard two-sided
+    Chamfer distance here, but that also penalizes every point on the FULL
+    surface (including the opposite cap) for being far from the one small
+    target ring; summed over every leave-one-out fold, that pressure is
+    minimized by shrinking the whole shape toward the interior -- observed
+    as both caps collapsing into a point (a real bug, not a shape-preserving
+    quirk of the method). The one-sided distance only asks "does the
+    reconstruction pass near this ring", with no penalty on the rest of the
+    surface, and does not exhibit the collapse."""
     N, m = obj["R"].shape[0], obj["R"].shape[1]
     dev, dt = obj["R"].device, obj["R"].dtype
     raw = {k: torch.zeros(N, m, device=dev, dtype=dt, requires_grad=True)
@@ -88,7 +105,10 @@ def tto_leave_one_out(obj, n_u, iters=400, lr=3e-2, reg=1e-3):
                       "s_fB": 2*torch.tanh(rawB),
                       "s_fC": 2*torch.tanh(rawC)}
             S = surf(sub, params, n_u)
-            loss = loss + chamfer(surface_points(S), Z3(i))
+            pred = surface_points(S)
+            target = Z3(i)
+            d_t2p, _ = _nn_sqdist(target, pred)   # ring -> surface only
+            loss = loss + d_t2p.mean()
         for v in list(raw.values()) + [rawB, rawC]:
             loss = loss + reg * (v ** 2).mean()
         loss.backward(); opt.step()
@@ -112,6 +132,10 @@ def main():
     ap.add_argument("--n1", type=int, default=25)
     ap.add_argument("--n_u", type=int, default=40)
     ap.add_argument("--out", default="results/designer")
+    ap.add_argument("--show_crown", action="store_true",
+                    help="also draw the vase's crown patch (hidden by "
+                         "default to match the paper's Figure 1c; the "
+                         "underlying surface always includes it)")
     a = ap.parse_args()
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     dt = torch.float64
@@ -133,8 +157,9 @@ def main():
         params = tto_leave_one_out(obj, a.n_u)
 
     S = surf(obj, params, a.n_u)
+    hide_crown = pre.get("hide_crown_render", False) and not a.show_crown
     render(S, os.path.join(a.out, f"{a.ds}_{a.mode}.png"),
-           f"{a.ds} — NSSR ({a.mode})")
+           f"{a.ds} — NSSR ({a.mode})", hide_crown=hide_crown)
 
 
 if __name__ == "__main__":
