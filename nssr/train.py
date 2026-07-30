@@ -54,7 +54,8 @@ def train(samples, val_samples, out_dir="runs/exp1", epochs=200, lr=1e-3,
           m=256, n_u=24, device=None, dtype=torch.float32,
           lam_n=0.1, lam_r=1e-3, lam_s=1e-3, accum=8,
           free_residual=False, seed=0, surf_sub=20000, gt_sub=20000,
-          val_every=5, patience=0, val_subset=0, eval_n_u=None):
+          val_every=5, patience=0, val_subset=0, eval_n_u=None,
+          init_ckpt=None):
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs(out_dir, exist_ok=True)
     torch.manual_seed(seed)
@@ -66,6 +67,10 @@ def train(samples, val_samples, out_dir="runs/exp1", epochs=200, lr=1e-3,
                 for i, s in enumerate(val_samples)]
 
     net = ParamNet(free_residual=free_residual).to(device=device, dtype=dtype)
+    if init_ckpt:
+        sd = torch.load(init_ckpt, map_location=device)
+        net.load_state_dict({k: v.to(dtype=dtype) for k, v in sd.items()})
+        print(f"initialized from {init_ckpt} (fine-tuning)")
     opt = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=0.0)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
 

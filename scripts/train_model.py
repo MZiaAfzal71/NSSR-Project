@@ -19,6 +19,10 @@ def main():
     ap.add_argument("--out", default="runs/exp1")
     ap.add_argument("--free_residual", action="store_true")
     ap.add_argument("--fp64", action="store_true")
+    ap.add_argument("--init_ckpt", default="",
+                    help="initialize from this checkpoint (e.g. a "
+                         "synthetic-trained model) instead of from the "
+                         "classical solution -- use for fine-tuning")
     ap.add_argument("--val_every", type=int, default=5)
     ap.add_argument("--patience", type=int, default=0,
                     help="early stop after this many epochs w/o val gain (0=off)")
@@ -39,6 +43,7 @@ def main():
           surf_sub=a.surf_sub, gt_sub=a.gt_sub,
           val_every=a.val_every, patience=a.patience,
           val_subset=a.val_subset, eval_n_u=(a.eval_n_u or None),
+          init_ckpt=(a.init_ckpt or None),
           dtype=torch.float64 if a.fp64 else torch.float32)
 
 if __name__ == "__main__":
