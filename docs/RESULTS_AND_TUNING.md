@@ -480,3 +480,40 @@ anything about cap behaviour without ground truth. That is a real and
 honest limitation of the training-data-free mode, and a clean argument for
 why the trained-network mode (which learns cap behaviour from the
 synthetic corpus) is the stronger operating point.
+
+## Ablation: "could you just retune the classical constants?"
+
+The classical pipeline contains several hand-chosen constants (lambda=mu=1/2,
+gamma=delta=1/4, the factor 2 at base/crown, kappa = 1 + (j mod 15) --
+described in the original paper as "chosen empirically", the sqrt(2) in the
+boundary scalings). The obvious reviewer question is whether NSSR's gain is
+just "those constants were badly chosen", reachable without any network.
+
+`scripts/ablation_global_constants.py` answers this rigorously: it fits a
+single global (s_a, s_b, s_tau) triple by grid search + refinement ON THE
+TRAIN SPLIT, then scores classical / global-retuned / learned on the
+held-out TEST split using the same preprocessing, resolution and metrics as
+`scripts/evaluate.py`.
+
+```bash
+python scripts/ablation_global_constants.py --data data/synthetic --N 7 \
+    --ckpt runs/exp_v2/best.pt --out results/ablation_N7.csv
+```
+
+A quick indicative NumPy version (8 objects, m=48, n_u=10, constants tuned
+IN-SAMPLE so generous to the baseline) gave global retuning +14.2% on
+chamfer_l2, against 40-62% for the learned model on the sparsity sweep.
+**Do not cite those two numbers side by side in the paper** -- they came
+from different protocols (different metric normalization, resolution,
+object count, in-sample vs held-out, and old vs new synthetic generator).
+The script above is what produces a citable, apples-to-apples number.
+
+Two things to watch when running it:
+* If the fitted optimum lands on the grid boundary the script warns you.
+  Widen the range; a boundary optimum may be exploiting resolution rather
+  than genuinely improving the surface.
+* Expect the honest gap to be smaller than the naive 14% vs 62% suggests,
+  because the held-out constant fit will score worse than an in-sample one.
+  The qualitative conclusion (a single global constant cannot express
+  corrections that differ per object and per region) is what matters, and
+  it should survive; but report the measured numbers, not the estimate.
