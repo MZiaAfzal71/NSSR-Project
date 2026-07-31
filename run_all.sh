@@ -11,6 +11,7 @@ mkdir -p results runs
 
 phase_verify() {
   echo "=== A: verification ==="
+  python scripts/verify_fixes.py
   python tests/numpy_sanity_check.py
   python tests/parity_check.py
   python tests/synthetic_family_check.py

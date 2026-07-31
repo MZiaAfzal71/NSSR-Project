@@ -11,6 +11,7 @@ paper's evidence.
 ## Phase A — verification (no GPU, ~2 min total)
 
 ```bash
+python scripts/verify_fixes.py              # confirm this copy is current
 python tests/numpy_sanity_check.py          # analytic objects reconstruct
 python tests/parity_check.py                # NSSR classical == your CiSE code
 python tests/synthetic_family_check.py      # 3 geometric families sane
@@ -18,7 +19,12 @@ python tests/euler_filter_check.py          # genus filter keeps/rejects right
 python scripts/smoke_test.py                # torch == numpy, gradients flow
 ```
 
-All five must pass. If `parity_check` fails, stop — everything downstream
+All must pass. `verify_fixes.py` checks the source ON DISK for every
+accumulated fix and prints file checksums, so it cannot be fooled by a
+stale in-memory import -- run it first whenever a result looks like a
+regression.
+
+All others must pass too. If `parity_check` fails, stop — everything downstream
 depends on the classical baseline being exactly your published method.
 
 ---
@@ -117,6 +123,55 @@ python scripts/check_mesh_pipeline.py --meshes data/meshes_test --N 9
 python scripts/fetch_thingi10k.py --out data/meshes --limit 200
 python scripts/check_mesh_pipeline.py --meshes data/meshes --N 9 --limit 25
 ```
+
+**Filter set (determined empirically, not guessed).** Running
+`scripts/diagnose_thingi10k.py --variant tetwild` on the real dataset gave:
+
+| filter | entries (of 9976) | verdict |
+|---|---:|---|
+| `closed=True` | 9007 | use |
+| `num_components=1` | 7754 | use |
+| `euler=2` | 2911 | **use — equals genus 0** |
+| `self_intersecting=False` | 9976 | no-op (TetWild removed them all) |
+| `solid=True` | **0** | column unpopulated — never use |
+| `vertex_manifold=True` | **0** | column unpopulated — never use |
+| `edge_manifold=True` | **0** | column unpopulated — never use |
+| `genus=0` | **0** | column unpopulated — use `euler=2` instead |
+
+The first run wrote zero meshes because it required `solid=True`, which is
+`False` for every entry in this variant (those boolean columns describe
+properties that are simply not filled in for the TetWild remeshes). The
+fix uses `euler=2`, which for a closed orientable manifold is exactly the
+genus-0 condition we want, and drops the unpopulated filters. Expected
+pool: roughly 1900 candidates.
+
+CLIP queries return only ~20 hits each, so the script now runs 16 queries
+and then tops up from the geometric pool to reach `--limit`.
+
+If a future run still writes 0, re-run the diagnostic and send the output:
+
+```bash
+python scripts/diagnose_thingi10k.py --variant tetwild
+```
+
+**Download-free fallback.** You are not blocked on Thingi10K. A corpus of
+randomized genus-0 solids of revolution (verified watertight, varied
+profiles, bent axes, circumferential lobes) can be generated locally and
+run through the *identical* mesh pipeline -- slicing, dataset build,
+training:
+
+```bash
+python scripts/make_test_meshes.py --out data/meshes_gen --count 200
+python scripts/check_mesh_pipeline.py --meshes data/meshes_gen --N 9 --limit 20
+python scripts/make_mesh_dataset.py --meshes data/meshes_gen --N 5 7 9 15 \
+    --out data/real
+```
+
+Be precise about this in the paper: these are *generated* meshes exercised
+through the real-mesh path, not scanned real-world objects. They validate
+the mesh pipeline end to end and give a second, independent evaluation
+corpus, but they are not a substitute for a real-data claim. Use them to
+keep progressing while the Thingi10K issue is resolved.
 
 **Critical choice:** `fetch_thingi10k.py` defaults to the **tetwild**
 variant. Raw Thingi10K is 50% non-solid, 26% multi-component, 22%

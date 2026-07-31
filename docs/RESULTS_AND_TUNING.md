@@ -517,3 +517,45 @@ Two things to watch when running it:
   The qualitative conclusion (a single global constant cannot express
   corrections that differ per object and per region) is what matters, and
   it should survive; but report the measured numbers, not the estimate.
+
+## TTO fix #6: the cap freeze was anchored to ZERO, which broke --tto_init net
+
+Reported symptom: after fix #5 the designer shapes looked correct, but the
+cap loops REAPPEARED specifically when running `--mode tto --tto_init net`.
+
+Cause: fix #5 hard-zeroed the cap scalings (`s_fB`, `s_fC`) and pulled all
+predicted fields toward zero (= classical). That is self-consistent when
+starting from classical, because the zero-initialized ParamNet already
+outputs ~0 -- which is exactly why `--tto_init classical` looked fine and
+masked the bug. But a TRAINED checkpoint predicts non-zero cap scalings
+learned from ground truth, and its boundary-row tangents were co-adapted
+with those values. Zeroing the caps while keeping the learned boundary
+tangents is an inconsistent pairing: the cap geometry no longer matches the
+tangents feeding into it. The anchor compounded it by dragging the
+checkpoint's predictions back toward classical -- fighting the very
+initialization the user asked for.
+
+The user also made the sharper conceptual point: freezing the caps IS
+"fixing instead of learning". True, and unavoidable for `--tto_init
+classical`, where leave-one-out provides no cap signal at all. But with
+`net` init the caps HAVE been learned from real supervision, so zeroing
+them discards precisely the information that initialization was meant to
+contribute.
+
+Fix: both the freeze and the anchor are now relative to a REFERENCE
+computed once from the initial network, before any optimization:
+
+  * `--tto_init classical` -> ParamNet heads are zero-initialized, so
+    reference == 0 exactly, and the previously-working behaviour is
+    preserved bit-for-bit.
+  * `--tto_init net` -> reference == the trained model's own predictions;
+    caps are held at their LEARNED values, and the anchor pulls toward the
+    checkpoint instead of away from it.
+
+The rule is now "stay near your starting point except where the data says
+otherwise", with the starting point being whatever the user chose.
+
+Diagnostics now print BOTH `|s|` and `|s - reference|` drift per row, since
+under `--tto_init net` a large `|s|` may be what the trained model already
+predicted rather than something tto introduced -- the drift column is the
+one that shows what test-time optimization actually changed.

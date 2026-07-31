@@ -44,7 +44,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 
 DEFAULT_QUERIES = ["a vase", "a bottle", "a jar", "a cup", "a bowl",
-                   "an egg", "a pear", "a simple round pot"]
+                   "an egg", "a pear", "a simple round pot", "a flower pot",
+                   "a drinking glass", "a bud vase", "an urn", "a goblet",
+                   "a rounded container", "a smooth organic shape",
+                   "a piece of fruit"]
 
 
 def euler_genus(V_count, F):
@@ -118,16 +121,73 @@ def main():
         kw["cache_dir"] = a.cache_dir
     thingi10k.init(**kw)
 
-    # Geometric filters supported by thingi10k.dataset(); see
-    # help(thingi10k.dataset) for the full list.
+    # Filter set determined empirically with scripts/diagnose_thingi10k.py
+    # on the tetwild variant (9976 entries total):
+    #   closed=True             -> 9007   (usable)
+    #   num_components=1        -> 7754   (usable)
+    #   self_intersecting=False -> 9976   (no-op: TetWild removed them all)
+    #   euler=2                 -> 2911   (usable; == GENUS 0 for a closed
+    #                                      orientable manifold, exactly the
+    #                                      property we need)
+    #   solid=True              ->    0   <-- column unpopulated for this
+    #   vertex_manifold=True    ->    0       variant; ALL entries are False
+    #   edge_manifold=True      ->    0       so these filters wipe everything
+    #   genus=0                 ->    0   <-- column unpopulated; use euler=2
+    # Requiring solid=True is what made the first run write zero meshes.
     base_filters = dict(closed=True, num_components=1,
-                        self_intersecting=False, solid=True,
+                        euler=2,
                         num_vertices=(a.min_vertices, a.max_vertices))
+
+    def count_of(**kw):
+        """Size of a filtered dataset, tolerating unsupported kwargs."""
+        try:
+            ds = thingi10k.dataset(**kw)
+        except TypeError:
+            return None
+        try:
+            return len(ds)
+        except TypeError:
+            n = 0
+            for _ in ds:
+                n += 1
+            return n
+
+    # ---- progressively relax the filters until something survives -------
+    # A silently-empty result set is the most likely failure mode here
+    # (metadata fields differ between variants, and CLIP query + strict
+    # filters can intersect to nothing), so probe BEFORE downloading meshes
+    # and report exactly what was dropped.
+    relax_order = ["num_vertices", "euler", "num_components", "closed"]
+    active = dict(base_filters)
+    n = count_of(**active)
+    if n in (None, 0):
+        print(f"full filter set yields {n} entries -- relaxing:")
+        for key in relax_order:
+            if key not in active:
+                continue
+            dropped = active.pop(key)
+            n = count_of(**active)
+            print(f"  dropped {key}={dropped} -> {n} entries")
+            if n:
+                break
+    if not n:
+        print("ERROR: no entries even with all filters relaxed. Run:\n"
+              "  python scripts/diagnose_thingi10k.py --variant "
+              f"{a.variant}\nand send me the output.")
+        return 1
+    print(f"using filters {active} ({n} candidate entries)")
 
     queries = ([] if a.no_query
                else (a.queries if a.queries is not None else DEFAULT_QUERIES))
-    plans = ([{"query": q, **base_filters} for q in queries] if queries
-             else [dict(base_filters)])
+    if queries:
+        probe = count_of(query=queries[0], **active)
+        if probe in (None, 0):
+            print(f"CLIP query {queries[0]!r} + filters yields {probe} "
+                  f"entries -> disabling semantic search, using geometric "
+                  f"filters only")
+            queries = []
+    plans = ([{"query": q, **active} for q in queries] if queries
+             else [dict(active)])
 
     written, seen = 0, set()
     stats = {"euler_reject": 0, "genus_reject": 0, "aspect_reject": 0,
@@ -141,7 +201,7 @@ def main():
         except TypeError as e:
             print(f"  filter not supported by this thingi10k version ({e}); "
                   f"retrying with geometric filters only")
-            it = thingi10k.dataset(**base_filters)
+            it = thingi10k.dataset(**active)
         for entry in it:
             if written >= a.limit or got >= a.per_query:
                 break
@@ -177,8 +237,55 @@ def main():
         if written >= a.limit:
             break
 
+    # CLIP queries return only ~20 hits each, so top up from the geometric
+    # pool if we are still short of --limit.
+    if written < a.limit and queries:
+        print(f"\n--- topping up with geometric filters only "
+              f"({written}/{a.limit} so far)")
+        try:
+            for entry in thingi10k.dataset(**active):
+                if written >= a.limit:
+                    break
+                fid = entry.get("file_id")
+                if fid in seen:
+                    continue
+                seen.add(fid)
+                try:
+                    V, F = thingi10k.load_file(entry["file_path"])
+                    V = np.asarray(V, dtype=np.float64)
+                    F = np.asarray(F, dtype=np.int64)
+                    if F.shape[1] != 3:
+                        stats["load_fail"] += 1
+                        continue
+                except Exception:                      # noqa: BLE001
+                    stats["load_fail"] += 1
+                    continue
+                euler, genus, edge_ok = euler_genus(V.shape[0], F)
+                if not edge_ok:
+                    stats["euler_reject"] += 1
+                    continue
+                if genus > a.max_genus:
+                    stats["genus_reject"] += 1
+                    continue
+                if not aspect_ok(V):
+                    stats["aspect_reject"] += 1
+                    continue
+                write_obj(os.path.join(a.out, f"thingi_{fid}.obj"), V, F)
+                written += 1
+                stats["ok"] += 1
+        except Exception as e:                         # noqa: BLE001
+            print(f"  top-up pass failed: {type(e).__name__}: {e}")
+        print(f"  after top-up: {written}")
+
     print(f"\nwrote {written} meshes to {a.out}")
     print("filter outcomes:", stats)
+    if written == 0:
+        print("\nNOTHING WAS WRITTEN. All-zero counters above mean the "
+              "dataset query returned no entries at all (not that meshes "
+              "were rejected). Run:\n"
+              f"  python scripts/diagnose_thingi10k.py --variant {a.variant}\n"
+              "and send me the output.")
+        return 1
     print("\nNext:")
     print(f"  python scripts/check_mesh_pipeline.py --meshes {a.out} "
           f"--N 9 --limit 20")

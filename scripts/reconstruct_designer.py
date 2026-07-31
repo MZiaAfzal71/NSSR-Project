@@ -127,6 +127,33 @@ def tto_leave_one_out(obj, n_u, iters=300, lr=1e-3, reg=0.0, lam_prox=1e-2,
     if not interior:
         raise RuntimeError("no usable leave-one-out folds for this object")
 
+    # ---- reference ("do not drift from here") parameters -----------------
+    # Computed ONCE from the initial network, before any optimization.
+    #   init_net=None  -> zero-initialized net -> reference == classical
+    #   init_net=ckpt  -> reference == the trained model's own predictions
+    # Everything below anchors to THIS reference rather than to zero. An
+    # earlier version hard-zeroed the cap scalings and pulled all fields
+    # toward zero; that is self-consistent when starting from classical
+    # (the zero-init net already outputs ~0), which is why --tto_init
+    # classical looked fine -- but it BROKE --tto_init net, because the
+    # trained checkpoint predicts non-zero cap scalings and boundary-row
+    # tangents that were co-adapted with them. Zeroing the caps while
+    # keeping those tangents is an inconsistent pairing, and it reintroduced
+    # the cap loops. It also meant the anchor fought the very checkpoint the
+    # user asked to start from.
+    net.eval()
+    ref = {}
+    with torch.no_grad():
+        for i in interior:
+            keep = [k for k in range(N) if k != i]
+            f = contour_features(obj["R"][keep], obj["Z"][keep], obj["RB"],
+                                 obj["RC"], obj["Bh"], obj["Th"])
+            ref[i] = {k: v.detach().clone() for k, v in net(f).items()}
+        f_full = contour_features(obj["R"], obj["Z"], obj["RB"], obj["RC"],
+                                  obj["Bh"], obj["Th"])
+        ref_full = {k: v.detach().clone() for k, v in net(f_full).items()}
+    net.train()
+
     for it in range(iters):
         opt.zero_grad()
         loss = 0.0
@@ -139,10 +166,12 @@ def tto_leave_one_out(obj, n_u, iters=300, lr=1e-3, reg=0.0, lam_prox=1e-2,
             params = net(feats)
             # The leave-one-out objective NEVER constrains the base or crown
             # cap (no fold targets them), so their scalings receive zero data
-            # signal. Freeze them at classical rather than let them drift.
+            # signal. Hold them at their REFERENCE values -- classical when
+            # starting from classical, the trained model's learned caps when
+            # starting from a checkpoint -- instead of letting them drift.
             params = {**params,
-                      "s_fB": torch.zeros_like(params["s_fB"]),
-                      "s_fC": torch.zeros_like(params["s_fC"])}
+                      "s_fB": ref[i]["s_fB"],
+                      "s_fC": ref[i]["s_fC"]}
             S = surf(sub, params, n_u)
             # Compare against the GAP PATCH ONLY, not the whole surface.
             # Patch order is [base cap, interior 1..Nsub-1, crown cap], and
@@ -156,13 +185,13 @@ def tto_leave_one_out(obj, n_u, iters=300, lr=1e-3, reg=0.0, lam_prox=1e-2,
             gap_patch = S[i].reshape(-1, 3)
             d_t2p, _ = _nn_sqdist(Z3(i), gap_patch)
             loss = loss + d_t2p.mean()
-            prox = prox + sum((params[k] ** 2).mean()
+            prox = prox + sum(((params[k] - ref[i][k]) ** 2).mean()
                               for k in ("s_a", "s_b", "s_tau"))
-        # Proximity-to-classical anchor. This is what keeps the UNSUPERVISED
-        # regions (both caps always; also interior(0,1) on the vase, whose
-        # only fold is the degenerate skipped one) at the classical solution
-        # instead of drifting wherever the shared network weights happen to
-        # take them -- the cause of the exploding cap cones. Supervised
+        # Proximity-to-REFERENCE anchor. Keeps the UNSUPERVISED regions
+        # (both caps always; also interior(0,1) on the vase, whose only fold
+        # is the degenerate skipped one) at wherever the initialization put
+        # them, instead of drifting wherever the shared network weights
+        # happen to go -- the cause of the exploding cap cones. Supervised
         # regions still move freely, since the data term dominates there.
         loss = loss + lam_prox * prox
         loss.backward()
@@ -176,16 +205,21 @@ def tto_leave_one_out(obj, n_u, iters=300, lr=1e-3, reg=0.0, lam_prox=1e-2,
         feats = contour_features(obj["R"], obj["Z"], obj["RB"], obj["RC"],
                                  obj["Bh"], obj["Th"])
         params = {k: v.detach() for k, v in net(feats).items()}
-        # caps unsupervised by this objective -> keep them classical
-        params["s_fB"] = torch.zeros_like(params["s_fB"])
-        params["s_fC"] = torch.zeros_like(params["s_fC"])
+        # caps unsupervised by this objective -> hold at the reference
+        # (classical if init from classical; the trained model's own
+        # learned caps if init from a checkpoint)
+        params["s_fB"] = ref_full["s_fB"]
+        params["s_fC"] = ref_full["s_fC"]
     # Diagnostics: s is bounded to +-2 (=> tangent weights within e^{+-2}).
-    # Values pinned near +-2, especially on rows the folds never supervise,
-    # mean the anchor is too weak -- raise --tto_prox.
-    print("  tto parameter magnitudes (|s| max per row, bound = 2.0):")
+    # We report BOTH the absolute magnitude and the drift from the
+    # reference, since with --tto_init net a large |s| may simply be what
+    # the trained model already predicted, not something tto introduced.
+    print("  tto per-row |s| (bound 2.0)  and  |s - reference| drift:")
     for k in ("s_a", "s_b", "s_tau"):
-        per_row = params[k].abs().max(dim=1).values.cpu().numpy()
-        print(f"    {k:6s} " + " ".join(f"{v:.2f}" for v in per_row))
+        mag = params[k].abs().max(dim=1).values.cpu().numpy()
+        drift = (params[k] - ref_full[k]).abs().max(dim=1).values.cpu().numpy()
+        print(f"    {k:6s} |s|   " + " ".join(f"{v:.2f}" for v in mag))
+        print(f"    {'':6s} drift " + " ".join(f"{v:.2f}" for v in drift))
     return params
 
 

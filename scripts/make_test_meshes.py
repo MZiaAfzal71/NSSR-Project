@@ -118,14 +118,88 @@ def write_obj(path, V, F):
             fh.write(f"f {f[0]+1} {f[1]+1} {f[2]+1}\n")
 
 
+def randomized_profile(rng):
+    """A random smooth positive profile -> a varied genus-0 solid of
+    revolution. Used by --count to generate a CORPUS of distinct objects
+    (not just the 4 fixed shapes), so the mesh pipeline can be exercised
+    at dataset scale without any download."""
+    k = rng.integers(3, 7)
+    ctrl = rng.uniform(0.25, 1.0, k)
+    ctrl[0] *= rng.uniform(0.15, 0.5)
+    ctrl[-1] *= rng.uniform(0.15, 0.5)
+    tc = np.linspace(0, 1, k)
+    bend = rng.uniform(0.0, 0.7) if rng.random() < 0.5 else 0.0
+    hgt = rng.uniform(1.2, 2.6)
+    lobes = int(rng.integers(0, 4))
+    amp = rng.uniform(0.0, 0.12)
+    phase = rng.uniform(0, 2 * np.pi)
+
+    def prof(t):
+        t = np.asarray(t)
+        i = np.clip(np.searchsorted(tc, t, side="right") - 1, 0, k - 2)
+        w = (t - tc[i]) / (tc[i + 1] - tc[i])
+        w = 0.5 - 0.5 * np.cos(np.pi * w)
+        r = ctrl[i] * (1 - w) + ctrl[i + 1] * w
+        r = r * np.sin(np.pi * np.clip(t, 0, 1)) ** 0.3
+        return np.clip(r, 1e-3, None), hgt * t - hgt / 2
+    return prof, bend, lobes, amp, phase
+
+
+def build_random_mesh(rng, n_t=80, n_th=56):
+    prof, bend, lobes, amp, phase = randomized_profile(rng)
+    t = np.linspace(0.0, 1.0, n_t)
+    th = np.linspace(0.0, 2 * np.pi, n_th, endpoint=False)
+    r, z = prof(t)
+    ripple = 1.0 + (amp * np.cos(lobes * th + phase) if lobes else 0.0)
+    verts = [np.array([bend * np.sin(np.pi * t[0]), 0.0, z[0]])]
+    for i in range(1, n_t - 1):
+        x0 = bend * np.sin(np.pi * t[i])
+        rr = r[i] * ripple
+        verts.append(np.stack([x0 + rr * np.cos(th), rr * np.sin(th),
+                               np.full(n_th, z[i])], axis=1))
+    verts.append(np.array([bend * np.sin(np.pi * t[-1]), 0.0, z[-1]]))
+    V = np.vstack([verts[0][None, :]] + verts[1:-1] + [verts[-1][None, :]])
+    faces = []
+    n_rings = n_t - 2
+    for j in range(n_th):
+        faces.append([0, 1 + j, 1 + (j + 1) % n_th])
+    for i in range(n_rings - 1):
+        a0 = 1 + i * n_th; b0 = 1 + (i + 1) * n_th
+        for j in range(n_th):
+            j1 = (j + 1) % n_th
+            faces.append([a0 + j, b0 + j, b0 + j1])
+            faces.append([a0 + j, b0 + j1, a0 + j1])
+    top = V.shape[0] - 1
+    a0 = 1 + (n_rings - 1) * n_th
+    for j in range(n_th):
+        faces.append([a0 + j, top, a0 + (j + 1) % n_th])
+    return V, np.asarray(faces, dtype=np.int64)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="data/meshes_test")
     ap.add_argument("--n_t", type=int, default=96)
     ap.add_argument("--n_th", type=int, default=64)
+    ap.add_argument("--count", type=int, default=0,
+                    help="also emit this many RANDOMIZED genus-0 meshes, "
+                         "giving a corpus large enough to build a real "
+                         "train/val/test split with no download")
+    ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     ok_all = True
+    if a.count:
+        rng = np.random.default_rng(a.seed)
+        bad = 0
+        for i in range(a.count):
+            V, F = build_random_mesh(rng)
+            _, _, ok = check_watertight(V, F)
+            ok_all &= ok
+            bad += (not ok)
+            write_obj(os.path.join(a.out, f"rand_{i:04d}.obj"), V, F)
+        print(f"wrote {a.count} randomized meshes "
+              f"({bad} not watertight) -> {a.out}")
     for name in PROFILES:
         V, F = build_mesh(name, a.n_t, a.n_th)
         counts, euler, ok = check_watertight(V, F)
