@@ -231,6 +231,49 @@ python scripts/ablation_global_constants.py --data data/real --N 9 \
 
 ---
 
+## Phase H2 — visualize real results (do this as soon as H1 finishes)
+
+```bash
+python scripts/visualize_real.py --data data/real --N 9 \
+    --ckpt runs/real_N9/best.pt --n 8 --out results/real_figs
+```
+
+Per object, four panels: (a) the ground-truth mesh, (b) the input slice
+contours -- worth showing, because it makes vivid how little information
+the method actually gets, (c) the classical reconstruction and (d) the
+learned one, both coloured by distance to ground truth on a SHARED colour
+scale so they are directly comparable, with mean error and % improvement in
+each title. This is the real-data figure for the paper.
+
+You can also run it straight from meshes without building a dataset:
+```bash
+python scripts/visualize_real.py --meshes data/meshes --N 9 --n 6 \
+    --out results/real_figs_quick
+```
+
+### Inward-dipping poles on real data
+
+The apple's inward-folding caps are intended (the paper's non-monotone test
+case). For DESIGNER shapes this comes from the hardcoded `Null_Hts`. For
+real meshes there is no such prior, so `preprocess_object` now DETECTS a
+dimpled pole from the data: the height sequence reversing at an end
+(`Z[1] < Z[0]`, or `Z[-1] < Z[-2]`) means the slices are already folding
+back, so the cap must close inward. Detected ends get a cap reference
+INSIDE the contour range and use the non-circular cap formulas (Eqs. 33-34
+/ 37-38) -- exactly the apple's convention.
+
+Verified on the designer shapes: apple flags both poles, banana neither.
+(An earlier version of this detector tested mean RADIUS instead and was
+almost exactly anti-correlated with the truth -- the apple's radii shrink
+monotonically toward both poles, so radius never distinguished it.)
+
+Caveat worth stating in the paper: whether a real object's end is a dimple
+or a normal cap is only inferable when the slicing actually captures the
+reversal. If the outermost slice sits above the stem well, the object looks
+like a normal taper and gets an outward cap. Slice placement therefore
+determines what is recoverable -- an honest limitation of cross-sectional
+input generally, not of NSSR specifically.
+
 ## Phase I — external baseline (optional but strengthens the paper)
 
 ```bash

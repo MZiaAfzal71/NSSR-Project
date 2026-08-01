@@ -41,6 +41,13 @@ CHECKS = [
      "training can initialize from a checkpoint (synthetic->real finetune)"),
     ("nssr/synthetic.py", "FAMILY_PROBS", None,
      "three synthetic geometric families (standard/dimpled/open_top)"),
+    ("nssr/preprocess.py", "def pole_is_dimpled", None,
+     "inward-dipping poles detected from Z reversal (apple-style dimples "
+     "on real meshes)"),
+    ("nssr/preprocess.py", 'out["base_dimpled"]', None,
+     "dimple flags recorded and used to pick the non-circular cap formula"),
+    ("scripts/visualize_real.py", "panel_contours", None,
+     "GT vs input-slices vs reconstruction visualization"),
     ("nssr/slicing.py", "np.linalg.det(M) < 0", None,
      "mesh axis alignment is a rotation, never a reflection"),
     ("nssr/slicing.py", "to_2D=T", None,

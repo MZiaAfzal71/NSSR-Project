@@ -149,11 +149,63 @@ def cap_heights(R: np.ndarray, Z: np.ndarray, null_hts,
     return float(np.mean(zb)), float(np.mean(zc))
 
 
-def default_null_hts(Z: np.ndarray):
-    """When no physical prior is given (mesh / synthetic data): allow the
-    caps to extend up to one inter-slice gap beyond the end contours."""
-    return (float(Z[0] - abs(Z[1] - Z[0])),
-            float(Z[-1] + abs(Z[-1] - Z[-2])))
+def pole_is_dimpled(R: np.ndarray, at_base: bool, Z: np.ndarray | None = None,
+                    ratio_thresh: float = 1.0):
+    """Is this end of the object an INWARD-DIPPING pole (apple stem-well /
+    calyx) rather than a normal outward-closing cap?
+
+    Signal: the HEIGHT SEQUENCE REVERSES at that end. If Z[1] < Z[0] the
+    slices are already folding back down as they approach the base, so the
+    cap must close INWARD (into the body) rather than outward beyond the
+    end contour. Symmetrically at the crown if Z[-2] > Z[-1].
+
+    This is exactly the "non-monotone cross sections" condition the paper
+    designs the apple around, and it is what distinguishes it:
+        apple   dZ = [-0.213, ...,  -0.133]   <- negative at BOTH ends
+        banana  dZ = [+0.352, ...,  +0.106]
+        vase    dZ = [-0.082, ...,  -0.055]   <- see note below
+
+    NOTE an earlier version of this function tested MEAN RADIUS (end
+    contour larger than its neighbour => still widening => dimple). That
+    was wrong and almost exactly anti-correlated with the truth: the
+    apple's radii shrink monotonically toward both poles (1.0 -> 0.093), so
+    radius never distinguished it, while banana and vase false-fired.
+
+    Z is optional only for backward compatibility; without it the function
+    cannot decide and conservatively returns False.
+    """
+    if Z is None:
+        return False
+    Z = np.asarray(Z, dtype=np.float64)
+    if len(Z) < 3:
+        return False
+    span = abs(Z.max() - Z.min()) or 1.0
+    tol = 1e-6 * span
+    if at_base:
+        return bool(Z[1] - Z[0] < -tol)
+    return bool(Z[-1] - Z[-2] < -tol)
+
+
+def default_null_hts(Z: np.ndarray, R: np.ndarray | None = None,
+                     dimple_frac: float = 0.5):
+    """Cap reference heights when no physical prior is given (mesh /
+    synthetic data).
+
+    Outward pole  -> one inter-slice gap BEYOND the end contour.
+    Dimpled pole  -> a fraction of the gap INSIDE the contour range, so the
+                     cap folds back into the body (apple-style). Detected
+                     per end via `pole_is_dimpled`; pass R to enable.
+    """
+    Z = np.asarray(Z, dtype=np.float64)
+    g0 = abs(Z[1] - Z[0])
+    gN = abs(Z[-1] - Z[-2])
+    if R is None:
+        return (float(Z[0] - g0), float(Z[-1] + gN))
+    lo = (float(Z[0] + dimple_frac * g0) if pole_is_dimpled(R, True, Z)
+          else float(Z[0] - g0))
+    hi = (float(Z[-1] - dimple_frac * gN) if pole_is_dimpled(R, False, Z)
+          else float(Z[-1] + gN))
+    return (lo, hi)
 
 
 # ----------------------------------------------------------------------
@@ -171,7 +223,8 @@ def _normalize(R, Z, RB, RC, Bh, Th):
 
 def preprocess_object(raw_contours, Z, m: int = 256, null_hts=None,
                       base_circular=True, crown_circular=True,
-                      closed_top=True, use_null_hts_directly=False) -> dict:
+                      closed_top=True, use_null_hts_directly=False,
+                      dimple_frac: float = 0.5) -> dict:
     """Generic path: raw slice contours -> everything geometry.py needs.
     closed_top=False means no crown contour exists at all (e.g. a
     genuinely open real-world scan, or the synthetic open_top family);
@@ -181,15 +234,31 @@ def preprocess_object(raw_contours, Z, m: int = 256, null_hts=None,
     contours = [resample_contour(C, m) for C in raw_contours]
     R = align_contours(contours)
     RB, RC = base_crown_points(R)
-    null_hts = null_hts if null_hts is not None else default_null_hts(Z)
-    if use_null_hts_directly:                # e.g. the apple in the paper
-        Bh, Th = float(null_hts[0]), float(null_hts[1])
+    # Pass R so dimpled (inward-dipping) poles are detected from the
+    # contour data rather than assuming every end closes outward.
+    null_hts = (null_hts if null_hts is not None
+                else default_null_hts(Z, R, dimple_frac=dimple_frac))
+    dim_b = pole_is_dimpled(R, True, Z)
+    dim_c = pole_is_dimpled(R, False, Z)
+    if use_null_hts_directly or dim_b or dim_c:
+        # For a dimpled pole the circle-fit height search (Eqs. 12-17)
+        # assumes the cap lies beyond the end contour, so its root-selection
+        # rule does not apply; use the reference height directly for the
+        # dimpled end(s), exactly as the paper's apple does.
+        Bh_f, Th_f = cap_heights(R, Z, null_hts) if not use_null_hts_directly \
+            else (float(null_hts[0]), float(null_hts[1]))
+        Bh = float(null_hts[0]) if (use_null_hts_directly or dim_b) else Bh_f
+        Th = float(null_hts[1]) if (use_null_hts_directly or dim_c) else Th_f
     else:
         Bh, Th = cap_heights(R, Z, null_hts)
     out = _normalize(R, Z, RB, RC, Bh, Th)
-    out["base_circular"] = base_circular
-    out["crown_circular"] = crown_circular
+    # A dimpled pole is not a circular cap: the paper's apple uses the
+    # non-circular formulas (Eqs. 33-34 / 37-38) for exactly this reason.
+    out["base_circular"] = bool(base_circular and not dim_b)
+    out["crown_circular"] = bool(crown_circular and not dim_c)
     out["closed_top"] = closed_top
+    out["base_dimpled"] = dim_b
+    out["crown_dimpled"] = dim_c
     return out
 
 
