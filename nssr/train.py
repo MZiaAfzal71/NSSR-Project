@@ -36,6 +36,16 @@ def to_torch(sample, m=256, device="cpu", dtype=torch.float32,
             "closed_top": pre["closed_top"]}
 
 
+def cap_point_mask(S):
+    """Bool mask over surface_points(S) marking the base/crown cap patches
+    (first and last patch)."""
+    P, nu, m, _ = S.shape
+    mask = torch.zeros(P, nu, m, dtype=torch.bool, device=S.device)
+    mask[0] = True
+    mask[-1] = True
+    return mask.reshape(-1)
+
+
 def forward_object(net, obj, n_u=24):
     feats = contour_features(obj["R"], obj["Z"], obj["RB"], obj["RC"],
                              obj["Bh"], obj["Th"])
@@ -55,7 +65,7 @@ def train(samples, val_samples, out_dir="runs/exp1", epochs=200, lr=1e-3,
           lam_n=0.1, lam_r=1e-3, lam_s=1e-3, accum=8,
           free_residual=False, seed=0, surf_sub=20000, gt_sub=20000,
           val_every=5, patience=0, val_subset=0, eval_n_u=None,
-          init_ckpt=None):
+          init_ckpt=None, cap_weight=1.0):
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs(out_dir, exist_ok=True)
     torch.manual_seed(seed)
@@ -89,11 +99,13 @@ def train(samples, val_samples, out_dir="runs/exp1", epochs=200, lr=1e-3,
         opt.zero_grad()
         for step, k in enumerate(perm):
             obj = train_objs[k]
-            _, pts, nrms, params = forward_object(net, obj, n_u=n_u)
+            S, pts, nrms, params = forward_object(net, obj, n_u=n_u)
+            cmask = cap_point_mask(S) if cap_weight < 1.0 else None
             loss, parts = total_loss(pts, nrms, obj["gt_pts"],
                                      obj["gt_normals"], params,
                                      lam_n, lam_r, lam_s,
-                                     surf_sub=surf_sub, gt_sub=gt_sub)
+                                     surf_sub=surf_sub, gt_sub=gt_sub,
+                                     cap_mask=cmask, cap_weight=cap_weight)
             if epoch > 0:                                # epoch 0: eval only
                 (loss / accum).backward()
                 if (step + 1) % accum == 0:

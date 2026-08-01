@@ -16,6 +16,7 @@ phase_verify() {
   python tests/parity_check.py
   python tests/synthetic_family_check.py
   python tests/euler_filter_check.py
+  python tests/cap_height_check.py
   python scripts/smoke_test.py
 }
 

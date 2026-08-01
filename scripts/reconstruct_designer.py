@@ -232,6 +232,16 @@ def main():
     ap.add_argument("--ckpt", default="runs/exp1/best.pt")
     ap.add_argument("--n1", type=int, default=25)
     ap.add_argument("--n_u", type=int, default=40)
+    ap.add_argument("--freeze_caps", action="store_true",
+                    help="hold the boundary scalings s_fB/s_fC at the "
+                         "CLASSICAL values while still using the learned "
+                         "body tangents. The cap's height is fixed by Bh/Th "
+                         "(preprocessing) and is NOT learnable, so s_fB only "
+                         "controls radial bulge; because the caps carry ~8x "
+                         "the per-point error of the body, Chamfer training "
+                         "tends to shrink that bulge, which reads as a flat "
+                         "pole. Use this to keep classical cap appearance "
+                         "with an otherwise learned surface.")
     ap.add_argument("--tto_init", default="net", choices=["net", "classical"],
                     help="'net' = per-object fine-tune of the trained "
                          "checkpoint (usually best); 'classical' = start "
@@ -264,6 +274,9 @@ def main():
         with torch.no_grad():
             params = net(contour_features(obj["R"], obj["Z"], obj["RB"],
                                           obj["RC"], obj["Bh"], obj["Th"]))
+            if a.freeze_caps:
+                params["s_fB"] = torch.zeros_like(params["s_fB"])
+                params["s_fC"] = torch.zeros_like(params["s_fC"])
     else:
         init_sd = None
         if a.tto_init == "net":
@@ -273,6 +286,9 @@ def main():
                                    lr=a.tto_lr, lam_prox=a.tto_prox,
                                    init_net=init_sd, device=dev, dtype=dt)
 
+    if a.freeze_caps:
+        params["s_fB"] = torch.zeros_like(params["s_fB"])
+        params["s_fC"] = torch.zeros_like(params["s_fC"])
     S = surf(obj, params, a.n_u)
     hide_crown = pre.get("hide_crown_render", False) and not a.show_crown
     render(S, os.path.join(a.out, f"{a.ds}_{a.mode}.png"),

@@ -82,8 +82,14 @@ class ParamNet(nn.Module):
         nout = 3 + (2 if free_residual else 0)
         self.head = nn.Conv1d(hidden, nout, 1)
         self.bhead = nn.Conv1d(hidden, 2, 1)          # s_fB, s_fC
+        # Cap HEIGHT head: two scalars per object (s_bh, s_th), pooled over
+        # the whole object because Bh/Th are per-object quantities. These
+        # let the model change a cap's axial extent, which s_fB/s_fC cannot
+        # do (they only affect radial bulge).
+        self.hhead = nn.Linear(hidden, 2)
         nn.init.zeros_(self.head.weight); nn.init.zeros_(self.head.bias)
         nn.init.zeros_(self.bhead.weight); nn.init.zeros_(self.bhead.bias)
+        nn.init.zeros_(self.hhead.weight); nn.init.zeros_(self.hhead.bias)
 
     def forward(self, feats):                          # feats: (N, m, F)
         N, m, F = feats.shape
@@ -96,6 +102,12 @@ class ParamNet(nn.Module):
         b = self.c * torch.tanh(self.bhead(h))          # (N, 2, m)
         params["s_fB"] = b[0, 0]                        # base row
         params["s_fC"] = b[-1, 1]                       # crown row
+        # cap heights: pool the boundary rows (base row for s_bh, crown row
+        # for s_th) over the circumference -> one scalar each.
+        hb = self.hhead(h[0].mean(dim=-1))              # (2,)
+        hc = self.hhead(h[-1].mean(dim=-1))             # (2,)
+        params["s_bh"] = hb[0]
+        params["s_th"] = hc[1]
         return params
 
 

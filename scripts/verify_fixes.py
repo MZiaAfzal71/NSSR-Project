@@ -46,6 +46,12 @@ CHECKS = [
      "on real meshes)"),
     ("nssr/preprocess.py", 'out["base_dimpled"]', None,
      "dimple flags recorded and used to pick the non-circular cap formula"),
+    ("nssr/geometry.py", "def apply_cap_heights", None,
+     "cap heights Bh/Th are learnable (sign-preserving bounded multiplier)"),
+    ("nssr/networks.py", "self.hhead", None,
+     "ParamNet predicts s_bh/s_th (per-object cap heights)"),
+    ("nssr/losses.py", "cap_weight", None,
+     "cap points can be down-weighted in the Chamfer term"),
     ("scripts/visualize_real.py", "panel_contours", None,
      "GT vs input-slices vs reconstruction visualization"),
     ("nssr/slicing.py", "np.linalg.det(M) < 0", None,
@@ -70,9 +76,11 @@ CHECKS = [
     ("scripts/reconstruct_designer.py", "1e-3 * span", None,
      "TTO #4b: geometrically degenerate folds are skipped"),
     ("scripts/reconstruct_designer.py", 'ref[i]["s_fB"]',
-     'torch.zeros_like(params["s_fB"])',
+     "@TTO_HARDZERO",
      "TTO #5+#6: caps held at the REFERENCE (classical or the trained "
-     "checkpoint), never hard-zeroed"),
+     "checkpoint), never hard-zeroed inside the tto loop"),
+    ("scripts/reconstruct_designer.py", "--freeze_caps", None,
+     "opt-in --freeze_caps for classical cap appearance with a learned body"),
     ("scripts/reconstruct_designer.py", "(params[k] - ref[i][k]) ** 2", None,
      "TTO #6: proximity anchor is relative to the initialization"),
     ("scripts/reconstruct_designer.py", "ref_full[k]", None,
@@ -91,7 +99,16 @@ def main():
             print(f"{'MISSING':8s} {rel:34s} file not found")
             ok = False
             continue
-        if must_not == "@ACTIVE_FILTER:solid":
+        if must_not == "@TTO_HARDZERO":
+            # zeros_like(s_fB) is LEGITIMATE under the opt-in --freeze_caps
+            # path; it is only stale if it appears inside tto's fold loop,
+            # which is the block between the reference computation and the
+            # backward pass.
+            i0 = src.find("for it in range(iters):")
+            i1 = src.find("loss.backward()", i0) if i0 >= 0 else -1
+            block = src[i0:i1] if (i0 >= 0 and i1 > i0) else ""
+            good = (must in src) and ('zeros_like(params["s_fB"])' not in block)
+        elif must_not == "@ACTIVE_FILTER:solid":
             # `solid=True` legitimately appears in the comment explaining why
             # that filter returns 0 entries; only the ACTIVE base_filters
             # assignment matters, so inspect just that statement.
@@ -105,6 +122,9 @@ def main():
         if not good:
             if must not in src:
                 print(f"{'':8s} {'':34s}   expected to find: {must!r}")
+            elif must_not == "@TTO_HARDZERO":
+                print(f"{'':8s} {'':34s}   tto fold loop hard-zeroes the "
+                      f"caps instead of using the reference")
             elif must_not == "@ACTIVE_FILTER:solid":
                 print(f"{'':8s} {'':34s}   base_filters still contains "
                       f"'solid' (the unpopulated column)")

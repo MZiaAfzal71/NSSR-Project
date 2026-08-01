@@ -59,9 +59,28 @@ def normal_loss(pred_pts, pred_normals, gt_pts, gt_normals, gt_sub=None):
 
 def total_loss(pred_pts, pred_normals, gt_pts, gt_normals, params,
                lam_n=0.1, lam_r=1e-3, lam_s=1e-3,
-               surf_sub=20000, gt_sub=20000):
+               surf_sub=20000, gt_sub=20000, cap_mask=None, cap_weight=1.0):
+    """cap_mask: bool tensor over pred_pts marking CAP-patch points.
+    With cap_weight < 1 those points are subsampled before the Chamfer
+    term. Rationale: cap patches converge to a single point, so their
+    sampling density and per-point error are not comparable to the body
+    (measured: caps are ~17% of surface points but carry ~8x the per-point
+    error). Chamfer averages over points, so the poles dominate the
+    gradient and the cheapest way to reduce them is to shrink the cap's
+    radial bulge -- which renders as a flattened pole. The cap's HEIGHT is
+    fixed by Bh/Th in preprocessing and is not learnable, so the model
+    cannot fix the error the honest way."""
     from .networks import param_l2, param_smoothness
-    l_cd = chamfer(pred_pts, gt_pts, surf_sub=surf_sub, gt_sub=gt_sub)
+    pts_for_cd = pred_pts
+    if cap_mask is not None and cap_weight < 1.0:
+        keep = ~cap_mask
+        cap_idx = torch.nonzero(cap_mask, as_tuple=True)[0]
+        if cap_idx.numel():
+            n_keep = max(1, int(cap_idx.numel() * cap_weight))
+            sel = cap_idx[torch.randperm(cap_idx.numel(),
+                                         device=pred_pts.device)[:n_keep]]
+            pts_for_cd = torch.cat([pred_pts[keep], pred_pts[sel]], dim=0)
+    l_cd = chamfer(pts_for_cd, gt_pts, surf_sub=surf_sub, gt_sub=gt_sub)
     if gt_normals is not None:
         l_n = normal_loss(pred_pts, pred_normals, gt_pts, gt_normals,
                           gt_sub=gt_sub)

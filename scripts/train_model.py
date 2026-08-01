@@ -19,6 +19,12 @@ def main():
     ap.add_argument("--out", default="runs/exp1")
     ap.add_argument("--free_residual", action="store_true")
     ap.add_argument("--fp64", action="store_true")
+    ap.add_argument("--cap_weight", type=float, default=1.0,
+                    help="<1 down-weights CAP-patch points in the Chamfer "
+                         "term (e.g. 0.25). Caps are ~17%% of surface points "
+                         "but carry ~8x the per-point error, so they "
+                         "dominate the gradient and the model shrinks their "
+                         "radial bulge, flattening the poles.")
     ap.add_argument("--init_ckpt", default="",
                     help="initialize from this checkpoint (e.g. a "
                          "synthetic-trained model) instead of from the "
@@ -43,7 +49,7 @@ def main():
           surf_sub=a.surf_sub, gt_sub=a.gt_sub,
           val_every=a.val_every, patience=a.patience,
           val_subset=a.val_subset, eval_n_u=(a.eval_n_u or None),
-          init_ckpt=(a.init_ckpt or None),
+          init_ckpt=(a.init_ckpt or None), cap_weight=a.cap_weight,
           dtype=torch.float64 if a.fp64 else torch.float32)
 
 if __name__ == "__main__":

@@ -559,3 +559,101 @@ Diagnostics now print BOTH `|s|` and `|s - reference|` drift per row, since
 under `--tto_init net` a large `|s|` may be what the trained model already
 predicted rather than something tto introduced -- the drift column is the
 one that shows what test-time optimization actually changed.
+
+## Flattened base/crown in `--mode net`: cause and options
+
+Symptom: the trained model renders the banana (and other objects) with
+noticeably FLATTER caps than classical, in `--mode net` as well as tto, and
+it persists at 100 epochs -- so it is a converged prediction, not
+undertraining.
+
+Two measurements explain it:
+
+**1. The cap's height is NOT learnable.** Sweeping `s_fB` over its whole
+range on the banana:
+
+| s_fB | cap z-extent | cap radius at mid |
+|---:|---:|---:|
+| -2.0 | 0.0681 | 0.0921 |
+|  0.0 | 0.0681 | 0.1185 |
+| +2.0 | 0.0681 | 0.3162 |
+
+The z-extent is constant -- it is fixed by `Bh`/`Th`, computed in
+preprocessing. `s_fB` only controls how far the surface bulges RADIALLY on
+its way to the pole. So the network cannot make a cap taller or rounder; it
+can only make it bulge more or less.
+
+**2. Caps dominate the loss.** Measured over 12 synthetic objects: cap
+patches are **17% of surface points** but carry **8.3x the per-point error**
+of the body (0.1227 vs 0.0148). Chamfer averages over points, so a large
+concentrated error mass sits at the poles. Since the model cannot fix that
+error the honest way (height is fixed), the cheapest available move is to
+pull the cap surface inward -- i.e. shrink the radial bulge. That reads as a
+flat pole. It is a loss-shaping artifact.
+
+### Three remedies
+
+**(a) Freeze the caps at render time -- no retraining.** Exactly the "keep
+the rest of the surface the same" option:
+```bash
+python scripts/reconstruct_designer.py --ds banana --mode net \
+    --ckpt runs/exp_N15/best.pt --freeze_caps
+```
+Holds `s_fB`/`s_fC` at classical while the body still uses the learned
+tangents. Works with `--mode tto` too.
+
+**(b) Down-weight the caps during training -- principled fix.**
+```bash
+python scripts/train_model.py ... --cap_weight 0.25
+```
+Cap-patch points are subsampled in the Chamfer term so the poles stop
+dominating the gradient. Justified independently of this symptom: cap
+patches converge to a single point, so their sampling density and
+per-point error are simply not comparable to the body.
+
+**(c) Make `Bh`/`Th` learnable -- IMPLEMENTED.** Cap height is no longer a
+fixed preprocessing decision. `nssr/geometry.apply_cap_heights` applies a
+learned multiplier to the classical gap:
+
+    Bh' = Z[0]  - exp(s_bh) * (Z[0] - Bh)
+    Th' = Z[-1] + exp(s_th) * (Th - Z[-1])
+
+with `s = 0.7 * tanh(raw)`, so the gap scales within e^{+-0.7} (0.50x-2.01x)
+and `s = 0` reproduces the classical heights exactly. ParamNet gains a
+per-object head predicting `s_bh`/`s_th`.
+
+**Sign preservation is the critical design point.** The classical gap is
+POSITIVE for ordinary outward caps but NEGATIVE for inward-dipping poles
+(measured: banana +0.19x/+0.62x of the adjacent slice gap; apple
+-0.75x/-2.20x; vase -1.27x/-2.00x). A naive constraint like "Bh must lie
+below Z[0]" would destroy the apple's dimples. A multiplier rescales the
+gap while keeping whatever sign preprocessing detected, so Delta Z_0 can
+never cross zero -- which also protects the |Delta Z| denominators in the
+tangent formulas.
+
+Verified by `tests/cap_height_check.py` on all three designer shapes:
+s=0 exact classical recovery, sign preserved across s in [-6,6], bounds
+respected, and -- the point of the change -- the cap z-extent now RESPONDS
+(banana base cap: 0.0339 / 0.0681 / 0.1366 at s = -3 / 0 / +3, where
+previously it was frozen at 0.0681 for every parameter value).
+
+Use both together, as they fix different halves of the problem: cap weight
+fixes the INCENTIVE (poles no longer dominate the gradient), learnable
+heights fix the CAPABILITY (the model can now actually change cap extent).
+Learnable heights alone would still be trained under a loss where poles
+carry 8.3x the per-point error, so the optimizer would likely misuse the
+new freedom.
+
+```bash
+python scripts/train_model.py --data data/synthetic --N 9 --m 256 \
+    --epochs 100 --surf_sub 8000 --gt_sub 8000 --cap_weight 0.25 \
+    --val_every 5 --val_subset 25 --patience 30 --out runs/caps_v1
+```
+
+Worth an ablation for the paper: cap_weight on/off x learnable-heights
+on/off, reporting cap-region error separately from body error.
+
+For the paper: report (a) or (b) for the figures, and state (c) as a
+limitation. The measurement in point 2 is worth including -- "caps are 17%
+of points but 8.3x the error" is a concrete, checkable observation about
+why pole regions are hard in cross-sectional reconstruction generally.

@@ -37,6 +37,46 @@ def _cross2(u, v):
     return u[..., 0] * v[..., 1] - u[..., 1] * v[..., 0]
 
 
+
+
+def apply_cap_heights(Z, Bh, Th, params, max_log=0.7):
+    """Learned cap heights.
+
+    Bh and Th are the axial extents of the base/crown caps. Classically they
+    come from a circle fit (Eqs. 12-17) -- a heuristic construction, and the
+    only remaining quantity the model was structurally UNABLE to adjust:
+    sweeping s_fB changes a cap's radial bulge but never its z-extent, so a
+    cap that is too flat could not be fixed at all.
+
+    Parameterization: a learned MULTIPLIER on the classical gap, preserving
+    its sign.
+
+        Bh' = Z[0]  - exp(s_bh) * (Z[0] - Bh)
+        Th' = Z[-1] + exp(s_th) * (Th - Z[-1])
+
+    Sign preservation matters: the gap is POSITIVE for ordinary outward caps
+    (banana: +0.19x / +0.62x the adjacent slice gap) but NEGATIVE for
+    inward-dipping poles (apple: -0.75x / -2.20x; vase: -1.27x / -2.00x),
+    where the cap folds back into the body. A constraint such as "Bh must
+    lie below Z[0]" would destroy the apple's dimples. A multiplier keeps
+    whichever behaviour preprocessing detected and only rescales it, so the
+    sign of Delta Z_0 can never flip -- which also protects the |Delta Z|
+    denominators in the tangent formulas from crossing zero.
+
+    s = 0 reproduces the classical heights exactly. s is bounded to
+    +-max_log, i.e. the gap can shrink or grow by at most e^{max_log}
+    (~2x at the default), so a cap can never collapse to zero extent nor
+    run away.
+    """
+    if params is None or "s_bh" not in params:
+        return Bh, Th
+    sb = max_log * torch.tanh(params["s_bh"])
+    st = max_log * torch.tanh(params["s_th"])
+    Bh_new = Z[0] - torch.exp(sb) * (Z[0] - Bh)
+    Th_new = Z[-1] + torch.exp(st) * (Th - Z[-1])
+    return Bh_new, Th_new
+
+
 # ----------------------------------------------------------------------
 # Tangent field  (Eqs. 18-21, learnable reweighting per METHOD.md sec.2)
 # ----------------------------------------------------------------------
@@ -49,6 +89,9 @@ def tangent_field(R, Z, RB, RC, Bh, Th, params, closed_top=True):
     """
     N, m, _ = R.shape
     dev, dt = R.device, R.dtype
+    # Use the SAME (possibly learned) cap heights as hermite_surface, or
+    # the tangents and the surface would be built from different geometry.
+    Bh, Th = apply_cap_heights(Z, Bh, Th, params)
 
     # Chords between successive contours, with virtual base/crown rows.
     # dR[i] = R_i - R_{i-1} for i = 0..N  (row 0 uses RB, row N uses RC)
@@ -190,13 +233,18 @@ def hermite_surface(R, Z, RB, RC, Bh, Th, params, n_u=32,
     """
     N, m, _ = R.shape
     dev, dt = R.device, R.dtype
+    # tangent_field applies this too; both must see identical heights.
+    Bh, Th = apply_cap_heights(Z, Bh, Th, params)
     u = torch.linspace(0.0, 1.0, n_u, device=dev, dtype=dt)
     L0, L1, H0, H1 = hermite_basis(u)                       # (n_u,)
     L0 = L0.view(-1, 1, 1); L1 = L1.view(-1, 1, 1)
     H0 = H0.view(-1, 1, 1); H1 = H1.view(-1, 1, 1)
 
-    gR, gZ = tangent_field(R, Z, RB, RC, Bh, Th, params, closed_top)
-    fB, fC = boundary_scalings(R, RB, RC, Z, Bh, Th, gR, params, closed_top)
+    # heights already applied above -> strip them so tangent_field does not
+    # apply the multiplier a second time
+    p_no_h = {k: v for k, v in params.items() if k not in ("s_bh", "s_th")}
+    gR, gZ = tangent_field(R, Z, RB, RC, Bh, Th, p_no_h, closed_top)
+    fB, fC = boundary_scalings(R, RB, RC, Z, Bh, Th, gR, p_no_h, closed_top)
 
     patches = []
 
@@ -267,7 +315,9 @@ def zero_params(N, m, device="cpu", dtype=torch.float64, free_residual=False):
     """Parameter dict that reproduces the classical pipeline exactly."""
     z = lambda *s: torch.zeros(*s, device=device, dtype=dtype)
     p = {"s_a": z(N, m), "s_b": z(N, m), "s_tau": z(N, m),
-         "s_fB": z(m), "s_fC": z(m)}
+         "s_fB": z(m), "s_fC": z(m),
+         "s_bh": torch.zeros((), device=device, dtype=dtype),
+         "s_th": torch.zeros((), device=device, dtype=dtype)}
     if free_residual:
         p["rho"] = z(N, m, 2)
     return p
