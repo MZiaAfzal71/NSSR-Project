@@ -57,30 +57,57 @@ def normal_loss(pred_pts, pred_normals, gt_pts, gt_normals, gt_sub=None):
     return (1.0 - cos).mean()
 
 
+def chamfer_weighted(pred, gt, pred_w=None, surf_sub=None, gt_sub=None):
+    """Two-sided Chamfer with an optional PER-PREDICTED-POINT weight.
+
+    Both directions are weighted, which is the point:
+      pred->gt : each predicted point's distance is scaled by its weight.
+      gt->pred : each GT point is scaled by the weight of the predicted
+                 point it matched to.
+
+    Weighting only the pred->gt side (as an earlier version did, by
+    subsampling cap points) does almost nothing, because the gt->pred term
+    still requires a predicted point near every GT pole sample -- and that
+    is the term that actually penalizes a cap for being the wrong size.
+    Subsampling one side is in fact counterproductive: it removes predicted
+    cap points while keeping the GT pole points they must cover.
+    """
+    if surf_sub is not None and pred.shape[0] > surf_sub:
+        idx = torch.randperm(pred.shape[0], device=pred.device)[:surf_sub]
+        pred = pred[idx]
+        if pred_w is not None:
+            pred_w = pred_w[idx]
+    if gt_sub is not None and gt.shape[0] > gt_sub:
+        idx = torch.randperm(gt.shape[0], device=gt.device)[:gt_sub]
+        gt = gt[idx]
+    d_pg, _ = _nn_sqdist(pred, gt)
+    d_gp, idx_gp = _nn_sqdist(gt, pred)
+    if pred_w is None:
+        return d_pg.mean() + d_gp.mean()
+    w_pg = pred_w
+    w_gp = pred_w[idx_gp]
+    return ((d_pg * w_pg).sum() / w_pg.sum().clamp_min(1e-8)
+            + (d_gp * w_gp).sum() / w_gp.sum().clamp_min(1e-8))
+
+
 def total_loss(pred_pts, pred_normals, gt_pts, gt_normals, params,
                lam_n=0.1, lam_r=1e-3, lam_s=1e-3,
                surf_sub=20000, gt_sub=20000, cap_mask=None, cap_weight=1.0):
-    """cap_mask: bool tensor over pred_pts marking CAP-patch points.
-    With cap_weight < 1 those points are subsampled before the Chamfer
-    term. Rationale: cap patches converge to a single point, so their
-    sampling density and per-point error are not comparable to the body
-    (measured: caps are ~17% of surface points but carry ~8x the per-point
-    error). Chamfer averages over points, so the poles dominate the
-    gradient and the cheapest way to reduce them is to shrink the cap's
-    radial bulge -- which renders as a flattened pole. The cap's HEIGHT is
-    fixed by Bh/Th in preprocessing and is not learnable, so the model
-    cannot fix the error the honest way."""
+    """cap_mask: bool tensor over pred_pts marking CAP-patch points, given
+    weight `cap_weight` (<1) in BOTH Chamfer directions.
+
+    Rationale: cap patches converge to a single point, so their sampling
+    density and per-point error are not comparable to the body (measured:
+    caps are ~17% of surface points but carry ~8x the per-point error).
+    Chamfer averages over points, so the poles dominate the gradient."""
     from .networks import param_l2, param_smoothness
-    pts_for_cd = pred_pts
-    if cap_mask is not None and cap_weight < 1.0:
-        keep = ~cap_mask
-        cap_idx = torch.nonzero(cap_mask, as_tuple=True)[0]
-        if cap_idx.numel():
-            n_keep = max(1, int(cap_idx.numel() * cap_weight))
-            sel = cap_idx[torch.randperm(cap_idx.numel(),
-                                         device=pred_pts.device)[:n_keep]]
-            pts_for_cd = torch.cat([pred_pts[keep], pred_pts[sel]], dim=0)
-    l_cd = chamfer(pts_for_cd, gt_pts, surf_sub=surf_sub, gt_sub=gt_sub)
+    w = None
+    if cap_mask is not None and cap_weight != 1.0:
+        w = torch.ones(pred_pts.shape[0], device=pred_pts.device,
+                       dtype=pred_pts.dtype)
+        w = torch.where(cap_mask, torch.full_like(w, cap_weight), w)
+    l_cd = chamfer_weighted(pred_pts, gt_pts, pred_w=w,
+                            surf_sub=surf_sub, gt_sub=gt_sub)
     if gt_normals is not None:
         l_n = normal_loss(pred_pts, pred_normals, gt_pts, gt_normals,
                           gt_sub=gt_sub)

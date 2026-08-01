@@ -30,6 +30,27 @@ from nssr.networks import ParamNet, contour_features
 from nssr.losses import chamfer, _nn_sqdist
 
 
+
+def freeze_cap_params(params):
+    """Hold ALL cap-controlling parameters at their classical values.
+
+    Must cover BOTH families of cap parameter:
+      s_fB / s_fC -- radial bulge of the cap surface
+      s_bh / s_th -- the cap's AXIAL EXTENT (learned Bh/Th multipliers)
+
+    An earlier version zeroed only s_fB/s_fC, which is why --freeze_caps
+    appeared to do nothing: measured on the banana base cap, s_fB has NO
+    effect on z-extent (0.0681 at every value), while s_bh spans
+    0.0338-0.1371. The flatness the user was trying to suppress lives
+    entirely in s_bh/s_th.
+    """
+    out = dict(params)
+    for k in ("s_fB", "s_fC", "s_bh", "s_th"):
+        if k in out:
+            out[k] = torch.zeros_like(out[k])
+    return out
+
+
 def load_designer(ds, n1, device, dtype):
     pre = preprocess_designer(ds, n1=n1)
     T = lambda x: torch.as_tensor(np.asarray(x), device=device, dtype=dtype)
@@ -237,7 +258,9 @@ def main():
                          "CLASSICAL values while still using the learned "
                          "body tangents. The cap's height is fixed by Bh/Th "
                          "(preprocessing) and is NOT learnable, so s_fB only "
-                         "controls radial bulge; because the caps carry ~8x "
+                         "controls radial bulge, while s_bh/s_th control "
+                         "axial EXTENT (both are frozen by this flag); "
+                         "because the caps carry ~8x "
                          "the per-point error of the body, Chamfer training "
                          "tends to shrink that bulge, which reads as a flat "
                          "pole. Use this to keep classical cap appearance "
@@ -275,8 +298,7 @@ def main():
             params = net(contour_features(obj["R"], obj["Z"], obj["RB"],
                                           obj["RC"], obj["Bh"], obj["Th"]))
             if a.freeze_caps:
-                params["s_fB"] = torch.zeros_like(params["s_fB"])
-                params["s_fC"] = torch.zeros_like(params["s_fC"])
+                params = freeze_cap_params(params)
     else:
         init_sd = None
         if a.tto_init == "net":
@@ -287,8 +309,7 @@ def main():
                                    init_net=init_sd, device=dev, dtype=dt)
 
     if a.freeze_caps:
-        params["s_fB"] = torch.zeros_like(params["s_fB"])
-        params["s_fC"] = torch.zeros_like(params["s_fC"])
+        params = freeze_cap_params(params)
     S = surf(obj, params, a.n_u)
     hide_crown = pre.get("hide_crown_render", False) and not a.show_crown
     render(S, os.path.join(a.out, f"{a.ds}_{a.mode}.png"),

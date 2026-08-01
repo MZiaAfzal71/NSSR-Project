@@ -657,3 +657,56 @@ For the paper: report (a) or (b) for the figures, and state (c) as a
 limitation. The measurement in point 2 is worth including -- "caps are 17%
 of points but 8.3x the error" is a concrete, checkable observation about
 why pole regions are hard in cross-sectional reconstruction generally.
+
+
+## Why --cap_weight and --freeze_caps appeared to do nothing (two bugs)
+
+Both remedies were reported as having no visible effect. Both were real
+bugs, and both were mine.
+
+**1. `--freeze_caps` zeroed the wrong parameters.** It set `s_fB`/`s_fC`
+to zero -- but learnable cap HEIGHTS (`s_bh`/`s_th`) were added afterwards
+and the flag was never updated. Measured on the banana base cap:
+
+| condition | cap z-extent | mid radius |
+|---|---:|---:|
+| classical | 0.0681 | 0.1192 |
+| `s_fB = -2` (what freeze_caps zeroed) | **0.0681** | 0.0929 |
+| `s_bh = -0.7` (max shrink, NOT frozen) | **0.0338** | 0.1307 |
+| `s_bh = +0.7` (max grow) | **0.1371** | 0.1056 |
+
+`s_fB` has no effect whatsoever on axial extent; `s_bh` halves or doubles
+it. The flatness lives entirely in `s_bh`/`s_th`, so freezing `s_fB` could
+not possibly help. Fixed via a single `freeze_cap_params()` helper covering
+all four parameters, used by every call site.
+
+**2. `--cap_weight` only weighted ONE side of a two-sided loss.** It
+subsampled cap points from the prediction->GT direction. But the GT->pred
+direction still demands a predicted point near every ground-truth pole
+sample, and THAT is the term that penalizes a cap for being the wrong
+size. Subsampling one side is in fact counterproductive: it removes
+predicted cap points while keeping the GT pole points they have to cover.
+
+Replaced with `chamfer_weighted()`, which applies a true per-point weight
+to both directions (the GT->pred term uses the weight of the predicted
+point each GT sample matched to). Verified numerically: weight 1.0
+reproduces the unweighted value exactly, and lower weights monotonically
+reduce cap influence.
+
+Re-run both after these fixes:
+```bash
+# render-time control, no retraining
+python scripts/reconstruct_designer.py --ds banana --mode net \
+    --ckpt runs/exp_N15/best.pt --freeze_caps
+
+# retrain with genuinely down-weighted caps
+python scripts/train_model.py --data data/synthetic --N 9 --m 256 \
+    --epochs 100 --cap_weight 0.25 --surf_sub 8000 --gt_sub 8000 \
+    --val_every 5 --val_subset 25 --patience 30 --out runs/caps_v2
+```
+
+`--freeze_caps` should now visibly restore classical caps immediately,
+since it no longer depends on retraining. If it does and `--cap_weight`
+still does not, the informative next step is the 2x2 ablation with
+cap-region error reported SEPARATELY from body error -- a single Chamfer
+number cannot show which half of the surface changed.
