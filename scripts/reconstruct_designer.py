@@ -276,6 +276,12 @@ def main():
                     help="anchor toward the classical solution; raise if "
                          "unsupervised regions (caps) distort")
     ap.add_argument("--out", default="results/designer")
+    ap.add_argument("--no_learn_heights", action="store_true",
+                    help="build ParamNet without the cap-height head; must "
+                         "match how the checkpoint was TRAINED")
+    ap.add_argument("--tag", default="",
+                    help="extra suffix for the output filename, e.g. the "
+                         "checkpoint name, so runs are not overwritten")
     ap.add_argument("--show_crown", action="store_true",
                     help="also draw the vase's crown patch (hidden by "
                          "default to match the paper's Figure 1c; the "
@@ -291,7 +297,8 @@ def main():
     if a.mode == "classical":
         params = zero_params(N, m, device=dev, dtype=dt)
     elif a.mode == "net":
-        net = ParamNet().to(device=dev, dtype=dt)
+        net = ParamNet(learn_heights=not a.no_learn_heights).to(
+            device=dev, dtype=dt)
         net.load_state_dict(torch.load(a.ckpt, map_location=dev))
         net.eval()
         with torch.no_grad():
@@ -312,8 +319,24 @@ def main():
         params = freeze_cap_params(params)
     S = surf(obj, params, a.n_u)
     hide_crown = pre.get("hide_crown_render", False) and not a.show_crown
-    render(S, os.path.join(a.out, f"{a.ds}_{a.mode}.png"),
-           f"{a.ds} — NSSR ({a.mode})", hide_crown=hide_crown)
+
+    # Descriptive filename: the mode alone is ambiguous, since tto has two
+    # initializations and --freeze_caps is orthogonal to both.
+    tag = a.mode
+    if a.mode == "tto":
+        tag += f"_init-{a.tto_init}"
+    if a.freeze_caps:
+        tag += "_freezecaps"
+    if a.tag:
+        tag += f"_{a.tag}"
+    label = f"{a.ds} — NSSR ({a.mode}"
+    if a.mode == "tto":
+        label += f", init={a.tto_init}"
+    if a.freeze_caps:
+        label += ", caps frozen"
+    label += ")"
+    out_png = os.path.join(a.out, f"{a.ds}_{tag}.png")
+    render(S, out_png, label, hide_crown=hide_crown)
 
 
 if __name__ == "__main__":

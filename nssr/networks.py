@@ -70,10 +70,15 @@ class ParamNet(nn.Module):
     lets rows behave differently.
     """
 
-    def __init__(self, fdim=9, hidden=64, c_bound=2.0, free_residual=False):
+    def __init__(self, fdim=9, hidden=64, c_bound=2.0, free_residual=False,
+                 learn_heights=True):
         super().__init__()
         self.c = c_bound
         self.free_residual = free_residual
+        # learn_heights=False -> s_bh/s_th are never emitted, so
+        # apply_cap_heights() leaves Bh/Th at their classical values. This
+        # is the OFF arm of the learnable-heights ablation.
+        self.learn_heights = learn_heights
         self.body = nn.Sequential(
             CircConv(fdim, hidden), nn.SiLU(),
             CircConv(hidden, hidden), nn.SiLU(),
@@ -104,10 +109,11 @@ class ParamNet(nn.Module):
         params["s_fC"] = b[-1, 1]                       # crown row
         # cap heights: pool the boundary rows (base row for s_bh, crown row
         # for s_th) over the circumference -> one scalar each.
-        hb = self.hhead(h[0].mean(dim=-1))              # (2,)
-        hc = self.hhead(h[-1].mean(dim=-1))             # (2,)
-        params["s_bh"] = hb[0]
-        params["s_th"] = hc[1]
+        if self.learn_heights:
+            hb = self.hhead(h[0].mean(dim=-1))          # (2,)
+            hc = self.hhead(h[-1].mean(dim=-1))         # (2,)
+            params["s_bh"] = hb[0]
+            params["s_th"] = hc[1]
         return params
 
 

@@ -19,6 +19,10 @@ def main():
     ap.add_argument("--out", default="runs/exp1")
     ap.add_argument("--free_residual", action="store_true")
     ap.add_argument("--fp64", action="store_true")
+    ap.add_argument("--no_learn_heights", action="store_true",
+                    help="OFF arm of the learnable-cap-height ablation: the "
+                         "network never emits s_bh/s_th, so Bh/Th stay at "
+                         "their classical (preprocessing) values")
     ap.add_argument("--cap_weight", type=float, default=1.0,
                     help="<1 down-weights CAP-patch points in the Chamfer "
                          "term (e.g. 0.25). Caps are ~17%% of surface points "
@@ -50,6 +54,7 @@ def main():
           val_every=a.val_every, patience=a.patience,
           val_subset=a.val_subset, eval_n_u=(a.eval_n_u or None),
           init_ckpt=(a.init_ckpt or None), cap_weight=a.cap_weight,
+          learn_heights=not a.no_learn_heights,
           dtype=torch.float64 if a.fp64 else torch.float32)
 
 if __name__ == "__main__":
