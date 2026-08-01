@@ -70,11 +70,9 @@ class ParamNet(nn.Module):
     lets rows behave differently.
     """
 
-    def __init__(self, fdim=9, hidden=64, c_bound=2.0, free_residual=False,
-                 learn_heights=True):
+    def __init__(self, fdim=9, hidden=64, c_bound=2.0, learn_heights=True):
         super().__init__()
         self.c = c_bound
-        self.free_residual = free_residual
         # learn_heights=False -> s_bh/s_th are never emitted, so
         # apply_cap_heights() leaves Bh/Th at their classical values. This
         # is the OFF arm of the learnable-heights ablation.
@@ -84,7 +82,7 @@ class ParamNet(nn.Module):
             CircConv(hidden, hidden), nn.SiLU(),
             CircConv(hidden, hidden), nn.SiLU(),
         )
-        nout = 3 + (2 if free_residual else 0)
+        nout = 3
         self.head = nn.Conv1d(hidden, nout, 1)
         self.bhead = nn.Conv1d(hidden, 2, 1)          # s_fB, s_fC
         # Cap HEIGHT head: two scalars per object (s_bh, s_th), pooled over
@@ -102,8 +100,6 @@ class ParamNet(nn.Module):
         out = self.head(h)                             # (N, nout, m)
         s = self.c * torch.tanh(out)
         params = {"s_a": s[:, 0], "s_b": s[:, 1], "s_tau": s[:, 2]}
-        if self.free_residual:
-            params["rho"] = 0.1 * s[:, 3:5].permute(0, 2, 1)   # (N, m, 2)
         b = self.c * torch.tanh(self.bhead(h))          # (N, 2, m)
         params["s_fB"] = b[0, 0]                        # base row
         params["s_fC"] = b[-1, 1]                       # crown row

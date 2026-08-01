@@ -87,6 +87,17 @@ def main():
     ap.add_argument("--out", default="results/real_figs")
     ap.add_argument("--elev", type=float, default=14)
     ap.add_argument("--azim", type=float, default=20)
+    ap.add_argument("--pole_zoom", action="store_true",
+                    help="add a close-up of the base and crown poles, "
+                         "classical vs learned, coloured by distance to GT. "
+                         "The 2x2 cap ablation found the LEARNED cap is ~43%% "
+                         "more accurate than classical even though it reads "
+                         "as visually flatter -- this panel shows that "
+                         "directly, which is the evidence a reader needs "
+                         "for a counter-intuitive result.")
+    ap.add_argument("--pole_frac", type=float, default=0.18,
+                    help="fraction of the object's height included in the "
+                         "pole close-up")
     a = ap.parse_args()
 
     import torch
@@ -188,6 +199,42 @@ def main():
                 for coll in ax.collections:
                     if coll.get_array() is not None:
                         coll.set_clim(0, vmax)
+
+        if a.pole_zoom:
+            zlo, zhi = gt[:, 2].min(), gt[:, 2].max()
+            band = a.pole_frac * (zhi - zlo)
+            for which, sel_z in (("base", lambda P: P[:, 2] <= zlo + band),
+                                 ("crown", lambda P: P[:, 2] >= zhi - band)):
+                sets = [("ground truth", gt[sel_z(gt)], None),
+                        ("classical", P0[sel_z(P0)], None)]
+                if P1 is not None:
+                    sets.append(("NSSR learned", P1[sel_z(P1)], None))
+                fz = plt.figure(figsize=(4.1 * len(sets), 4.4))
+                vmaxp = 0.0
+                dists = []
+                for k, (lbl, Q, _) in enumerate(sets):
+                    d = nn_dist(Q, gt) if lbl != "ground truth" else None
+                    dists.append(d)
+                    if d is not None and len(d):
+                        vmaxp = max(vmaxp, float(d.max()))
+                for k, ((lbl, Q, _), d) in enumerate(zip(sets, dists)):
+                    ttl = lbl if d is None else f"{lbl}  (mean {d.mean():.4f})"
+                    panel_points(fz, (1, len(sets), k + 1), Q, ttl,
+                                 c=d, cmap="magma", s=3.0,
+                                 elev=6, azim=a.azim,
+                                 cbar_label=("distance to GT"
+                                             if d is not None else None))
+                for ax in fz.axes:
+                    for coll in ax.collections:
+                        if coll.get_array() is not None and vmaxp > 0:
+                            coll.set_clim(0, vmaxp)
+                nm = os.path.basename(s.get("path", f"object_{i}")).split(".")[0]
+                fz.suptitle(f"{nm} — {which} pole close-up", fontsize=11)
+                fz.tight_layout()
+                pp = os.path.join(a.out, f"pole_{which}_{i:02d}_{nm}.png")
+                fz.savefig(pp, dpi=160, bbox_inches="tight")
+                plt.close(fz)
+                print(f"wrote {pp}")
 
         name = os.path.basename(s.get("path", f"object_{i}")).split(".")[0]
         fig.suptitle(f"{name}", fontsize=11)

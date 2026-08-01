@@ -60,6 +60,8 @@ CHECKS = [
      "--freeze_caps holds s_fB/s_fC AND s_bh/s_th (axial extent)"),
     ("scripts/visualize_real.py", "panel_contours", None,
      "GT vs input-slices vs reconstruction visualization"),
+    ("scripts/visualize_real.py", "--pole_zoom", None,
+     "pole close-up comparing classical vs learned caps against GT"),
     ("nssr/slicing.py", "np.linalg.det(M) < 0", None,
      "mesh axis alignment is a rotation, never a reflection"),
     ("nssr/slicing.py", "to_2D=T", None,

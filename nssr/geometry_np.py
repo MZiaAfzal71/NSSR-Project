@@ -24,11 +24,9 @@ def _nrm(v, keepdims=True):
     return np.sqrt((v * v).sum(-1, keepdims=keepdims) + EPS)
 
 
-def zero_params_np(N, m, free_residual=False):
+def zero_params_np(N, m):
     p = {"s_a": np.zeros((N, m)), "s_b": np.zeros((N, m)),
          "s_tau": np.zeros((N, m)), "s_fB": np.zeros(m), "s_fC": np.zeros(m)}
-    if free_residual:
-        p["rho"] = np.zeros((N, m, 2))
     return p
 
 
@@ -60,8 +58,6 @@ def tangent_field_np(R, Z, RB, RC, Bh, Th, params=None, closed_top=True):
 
     tau = np.exp(params["s_tau"])
     gR = gR * tau[..., None]; gZ = gZ * tau
-    if params.get("rho") is not None:
-        gR = gR + params["rho"]
     return gR, gZ
 
 

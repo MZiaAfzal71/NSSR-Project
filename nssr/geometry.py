@@ -16,7 +16,6 @@ params : dict of learnable fields, all zero => EXACT classical pipeline:
     's_tau' : (N, m)  log tangent scale
     's_fB'  : (m,)    log-multiplier on base scaling f_B
     's_fC'  : (m,)    log-multiplier on crown scaling f_C
-    'rho'   : (N, m, 2) optional free residual for the ablation (L1')
 
 Note on the boundary "factor 2" (Eqs. 20-21): it is applied EXPLICITLY here
 (not through s_a init), so that params==0 reproduces the classical formulas
@@ -141,9 +140,6 @@ def tangent_field(R, Z, RB, RC, Bh, Th, params, closed_top=True):
     gR = gR * tau.unsqueeze(-1)
     gZ = gZ * tau
 
-    # optional free residual (ablation L1')
-    if "rho" in params and params["rho"] is not None:
-        gR = gR + params["rho"]
     return gR, gZ
 
 
@@ -311,13 +307,11 @@ def surface_normals(S):
     return n / _norm(n)
 
 
-def zero_params(N, m, device="cpu", dtype=torch.float64, free_residual=False):
+def zero_params(N, m, device="cpu", dtype=torch.float64):
     """Parameter dict that reproduces the classical pipeline exactly."""
     z = lambda *s: torch.zeros(*s, device=device, dtype=dtype)
     p = {"s_a": z(N, m), "s_b": z(N, m), "s_tau": z(N, m),
          "s_fB": z(m), "s_fC": z(m),
          "s_bh": torch.zeros((), device=device, dtype=dtype),
          "s_th": torch.zeros((), device=device, dtype=dtype)}
-    if free_residual:
-        p["rho"] = z(N, m, 2)
     return p

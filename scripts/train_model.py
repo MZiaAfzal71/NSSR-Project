@@ -1,7 +1,7 @@
 """Train NSSR.
 
 Usage:  python scripts/train_model.py --data data/synthetic --N 7 \
-            --epochs 200 --out runs/exp1 [--free_residual]
+            --epochs 200 --out runs/exp1
 """
 import sys, os, argparse, pickle
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -17,7 +17,6 @@ def main():
     ap.add_argument("--m", type=int, default=256)
     ap.add_argument("--reg", type=float, default=1e-3)
     ap.add_argument("--out", default="runs/exp1")
-    ap.add_argument("--free_residual", action="store_true")
     ap.add_argument("--fp64", action="store_true")
     ap.add_argument("--no_learn_heights", action="store_true",
                     help="OFF arm of the learnable-cap-height ablation: the "
@@ -49,7 +48,7 @@ def main():
     with open(os.path.join(a.data, f"val_N{a.N}.pkl"), "rb") as f:
         va = pickle.load(f)
     train(tr, va, out_dir=a.out, epochs=a.epochs, lr=a.lr, m=a.m,
-          n_u=a.n_u, lam_r=a.reg, free_residual=a.free_residual,
+          n_u=a.n_u, lam_r=a.reg,
           surf_sub=a.surf_sub, gt_sub=a.gt_sub,
           val_every=a.val_every, patience=a.patience,
           val_subset=a.val_subset, eval_n_u=(a.eval_n_u or None),

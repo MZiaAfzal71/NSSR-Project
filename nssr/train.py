@@ -63,7 +63,7 @@ def forward_object(net, obj, n_u=24):
 def train(samples, val_samples, out_dir="runs/exp1", epochs=200, lr=1e-3,
           m=256, n_u=24, device=None, dtype=torch.float32,
           lam_n=0.1, lam_r=1e-3, lam_s=1e-3, accum=8,
-          free_residual=False, seed=0, surf_sub=20000, gt_sub=20000,
+          seed=0, surf_sub=20000, gt_sub=20000,
           val_every=5, patience=0, val_subset=0, eval_n_u=None,
           init_ckpt=None, cap_weight=1.0, learn_heights=True):
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -76,8 +76,7 @@ def train(samples, val_samples, out_dir="runs/exp1", epochs=200, lr=1e-3,
     val_objs = [to_torch(s, m, device, dtype, seed=10_000 + i)
                 for i, s in enumerate(val_samples)]
 
-    net = ParamNet(free_residual=free_residual,
-                   learn_heights=learn_heights).to(device=device, dtype=dtype)
+    net = ParamNet(learn_heights=learn_heights).to(device=device, dtype=dtype)
     if init_ckpt:
         sd = torch.load(init_ckpt, map_location=device)
         net.load_state_dict({k: v.to(dtype=dtype) for k, v in sd.items()})

@@ -710,3 +710,69 @@ since it no longer depends on retraining. If it does and `--cap_weight`
 still does not, the informative next step is the 2x2 ablation with
 cap-region error reported SEPARATELY from body error -- a single Chamfer
 number cannot show which half of the surface changed.
+
+
+## Cap remedies: what the renders showed, and the 2x2 ablation
+
+After fixing `--freeze_caps` (it had been zeroing only `s_fB`/`s_fC`, not
+the height parameters `s_bh`/`s_th`), the banana renders showed:
+
+* `--tto_init classical` and `--tto_init net`: cap EXTENT increased --
+  so the learnable heights are working -- but the profile still reads flat.
+* `--freeze_caps`: looks correct.
+
+Interpretation: the two cap knobs cause two different symptoms, and only
+freezing both suppresses them together. `s_bh`/`s_th` set axial extent;
+`s_fB`/`s_fC` set radial bulge. Heights alone fixed the extent, while the
+bulge was still being driven down -- hence "taller but still flat".
+
+### Switching learnable heights off
+
+`ParamNet(learn_heights=False)` simply never emits `s_bh`/`s_th`, and
+`apply_cap_heights()` returns the classical `Bh`/`Th` when those keys are
+absent (verified: absent key reproduces classical exactly). The `hhead`
+layer is still constructed either way, so checkpoints load across both
+settings without state-dict key mismatches.
+
+Exposed as `--no_learn_heights` on `train_model.py`, `evaluate.py` and
+`reconstruct_designer.py`. **It must match how the checkpoint was trained.**
+
+### Running the 2x2
+
+```bash
+python scripts/ablation_caps.py --data data/synthetic --N 9 --epochs 60 \
+    --out results/ablation_caps.csv
+```
+
+Trains four arms (cap_weight 1.00/0.25 x heights OFF/ON) and evaluates each
+with **cap-region error reported separately from body error**. That
+separation is the whole point: caps are ~17% of surface points but carry
+~8x the per-point error, so an aggregate Chamfer number is dominated by the
+body and cannot reveal whether a cap intervention worked. Read the CAP
+column.
+
+Interpreting the outcome:
+* cap error improves with `cap_weight=0.25` -> the loss incentive was the
+  problem, and down-weighting is the principled fix.
+* cap error improves only with heights ON -> capability was the binding
+  constraint.
+* neither helps but `--freeze_caps` looks best -> the honest conclusion is
+  that the classical cap construction is simply better here, and NSSR
+  should learn the body while retaining classical caps. That is a
+  perfectly reportable result, and `--freeze_caps` becomes a stated design
+  choice rather than a workaround.
+
+### Output filenames
+
+`reconstruct_designer.py` now encodes the configuration in the filename,
+since `--mode tto` alone was ambiguous across two initializations and the
+orthogonal `--freeze_caps`:
+
+    banana_classical.png
+    banana_net.png
+    banana_net_freezecaps.png
+    banana_tto_init-classical.png
+    banana_tto_init-net_freezecaps.png
+
+`--tag` appends a further suffix (e.g. a checkpoint name) so repeated runs
+do not overwrite each other.

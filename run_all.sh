@@ -32,6 +32,10 @@ phase_synthetic() {
         --val_every 5 --val_subset 25 --patience 30 --out runs/synth_N$N
   done
 
+  echo "=== C2: cap ablation (2x2, cap/body error separated) ==="
+  python scripts/ablation_caps.py --data data/synthetic --N 9 \
+      --epochs 60 --out results/ablation_caps.csv
+
   echo "=== D: evaluation / sparsity sweep ==="
   for N in 5 7 9 15; do
     python scripts/evaluate.py --data data/synthetic --N $N \
@@ -55,6 +59,8 @@ phase_synthetic() {
         --tto_init net --ckpt runs/synth_N9/best.pt
     python scripts/reconstruct_designer.py --ds $ds --mode tto \
         --tto_init classical
+    python scripts/reconstruct_designer.py --ds $ds --mode net \
+        --ckpt runs/synth_N9/best.pt --freeze_caps
   done
   python scripts/reconstruct_designer.py --ds vase --mode classical --show_crown
 }
@@ -87,6 +93,10 @@ phase_real() {
   python scripts/evaluate.py --data data/real --N 9 \
       --ckpt runs/real_ft_N9/best.pt --n_u 32 \
       --out results/eval_real_finetune_N9.csv
+
+  echo "=== H2b: visualize real results (incl. pole close-ups) ==="
+  python scripts/visualize_real.py --data data/real --N 9 \
+      --ckpt runs/real_N9/best.pt --n 8 --pole_zoom --out results/real_figs
 
   echo "=== H2: zero-shot synthetic -> real ==="
   python scripts/evaluate.py --data data/real --N 9 \
