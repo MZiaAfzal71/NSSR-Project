@@ -1,0 +1,6 @@
+arm,cap_weight,heights,cap_err,body_err,all_err
+classical,-,-,0.11631,0.0169,0.03722
+A_w1.00_hOFF,1.0,False,0.06567,0.01383,0.02447
+B_w1.00_hON,1.0,True,0.06357,0.01392,0.02411
+C_w0.25_hOFF,0.25,False,0.0667,0.01408,0.02487
+D_w0.25_hON,0.25,True,0.06756,0.01378,0.02481
