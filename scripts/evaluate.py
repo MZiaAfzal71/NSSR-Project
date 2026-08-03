@@ -20,6 +20,8 @@ def main():
     ap.add_argument("--ckpt", default="runs/exp1/best.pt")
     ap.add_argument("--m", type=int, default=256)
     ap.add_argument("--n_u", type=int, default=32)
+    ap.add_argument("--c_bound", type=float, default=1.0,
+                    help="must match the value the checkpoint was trained with")
     ap.add_argument("--no_learn_heights", action="store_true",
                     help="must match how the checkpoint was trained")
     ap.add_argument("--out", default="results/eval.csv")
@@ -27,7 +29,8 @@ def main():
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     with open(os.path.join(a.data, f"test_N{a.N}.pkl"), "rb") as f:
         test = pickle.load(f)
-    net = ParamNet(learn_heights=not a.no_learn_heights).to(dev)
+    net = ParamNet(learn_heights=not a.no_learn_heights,
+                   c_bound=a.c_bound).to(dev)
     net.load_state_dict(torch.load(a.ckpt, map_location=dev))
     net.eval()
     os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)

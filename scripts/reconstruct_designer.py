@@ -28,6 +28,7 @@ from nssr.preprocess import preprocess_designer
 from nssr.geometry import hermite_surface, zero_params, surface_points
 from nssr.networks import ParamNet, contour_features
 from nssr.losses import chamfer, _nn_sqdist
+from nssr.metrics import axis_clearance
 
 
 
@@ -276,6 +277,8 @@ def main():
                     help="anchor toward the classical solution; raise if "
                          "unsupervised regions (caps) distort")
     ap.add_argument("--out", default="results/designer")
+    ap.add_argument("--c_bound", type=float, default=1.0,
+                    help="must match the value the checkpoint was trained with")
     ap.add_argument("--no_learn_heights", action="store_true",
                     help="build ParamNet without the cap-height head; must "
                          "match how the checkpoint was TRAINED")
@@ -297,8 +300,8 @@ def main():
     if a.mode == "classical":
         params = zero_params(N, m, device=dev, dtype=dt)
     elif a.mode == "net":
-        net = ParamNet(learn_heights=not a.no_learn_heights).to(
-            device=dev, dtype=dt)
+        net = ParamNet(learn_heights=not a.no_learn_heights,
+                       c_bound=a.c_bound).to(device=dev, dtype=dt)
         net.load_state_dict(torch.load(a.ckpt, map_location=dev))
         net.eval()
         with torch.no_grad():
@@ -335,6 +338,14 @@ def main():
     if a.freeze_caps:
         label += ", caps frozen"
     label += ")"
+    clr, ratio = axis_clearance(S, obj["R"])
+    print(f"axis clearance: {clr:.4f} ({ratio*100:.1f}% of the narrowest "
+          f"input contour)")
+    if ratio < 0.10:
+        print("  WARNING: the surface is collapsing onto the object axis. "
+              "This produces a pinch-to-a-point and a flared 'cone' in the "
+              "wireframe. Lower --c_bound (1.0 is safe on all three designer "
+              "shapes; 2.0 is not) and retrain, or raise --reg.")
     out_png = os.path.join(a.out, f"{a.ds}_{tag}.png")
     render(S, out_png, label, hide_crown=hide_crown)
 

@@ -70,7 +70,7 @@ class ParamNet(nn.Module):
     lets rows behave differently.
     """
 
-    def __init__(self, fdim=9, hidden=64, c_bound=2.0, learn_heights=True):
+    def __init__(self, fdim=9, hidden=64, c_bound=1.0, learn_heights=True):
         super().__init__()
         self.c = c_bound
         # learn_heights=False -> s_bh/s_th are never emitted, so

@@ -18,6 +18,14 @@ def main():
     ap.add_argument("--reg", type=float, default=1e-3)
     ap.add_argument("--out", default="runs/exp1")
     ap.add_argument("--fp64", action="store_true")
+    ap.add_argument("--c_bound", type=float, default=1.0,
+                    help="bound on the learned log-multipliers: tangent "
+                         "weights stay within e^{+-c_bound}. c=2 permits "
+                         "7.4x amplification, which pushes narrow features "
+                         "THROUGH the central axis (measured: the vase's "
+                         "0.19-radius neck collapses to 0.002 at s_tau=2). "
+                         "c=1 (2.7x) is safe on all three designer shapes. "
+                         "MUST match the value a checkpoint was trained with.")
     ap.add_argument("--no_learn_heights", action="store_true",
                     help="OFF arm of the learnable-cap-height ablation: the "
                          "network never emits s_bh/s_th, so Bh/Th stay at "
@@ -53,7 +61,7 @@ def main():
           val_every=a.val_every, patience=a.patience,
           val_subset=a.val_subset, eval_n_u=(a.eval_n_u or None),
           init_ckpt=(a.init_ckpt or None), cap_weight=a.cap_weight,
-          learn_heights=not a.no_learn_heights,
+          learn_heights=not a.no_learn_heights, c_bound=a.c_bound,
           dtype=torch.float64 if a.fp64 else torch.float32)
 
 if __name__ == "__main__":
