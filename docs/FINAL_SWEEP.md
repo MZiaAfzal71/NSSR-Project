@@ -88,3 +88,59 @@ better model.
 
 With those I can build every table and figure and draft the results and
 method sections.
+
+
+## IMPORTANT: c_bound must be 1.0 (was 2.0) — retrain before final figures
+
+The designer renders from the ablation checkpoints showed the vase's neck
+pinching to a point and flaring into a "cone", and a spindle artifact at the
+apple's poles. `--freeze_caps` did not help, which ruled out every cap
+parameter. Diagnosis, measured directly:
+
+The learned multiplier is bounded by e^{+-c_bound}. At the old default
+c_bound=2.0 the network may amplify a tangent by **7.4x**, and an amplified
+tangent on a NARROW feature overshoots inward THROUGH the central axis:
+
+| shape | narrowest contour | min interior radius @ s_tau=0 | @ 1.0 | @ 2.0 |
+|---|---:|---:|---:|---:|
+| vase (neck) | 0.191 | 0.191 | 0.174 | **0.002** |
+| apple (poles) | 0.027 | 0.027 | 0.027 | **0.003** |
+
+The pinch-to-a-point IS the surface crossing the axis; the "cone" is the
+wireframe on the far side. Chamfer barely notices, because the collapsing
+region is small -- which is why the ablation numbers looked healthy while
+the pictures were wrong. The falling `C1min` in the training logs
+(0.878 -> 0.135) was the same symptom seen from another angle: tangent
+magnitudes being driven to the bound.
+
+**Fixes applied**
+1. `--c_bound` is exposed on `train_model.py`, `evaluate.py` and
+   `reconstruct_designer.py`, **default now 1.0** (2.7x amplification),
+   which is safe on all three designer shapes. It MUST match between
+   training and inference.
+2. `nssr.metrics.axis_clearance` reports the smallest distance from the
+   interior surface to the object's LOCAL axis (interpolated per patch, so
+   it is valid for bent objects like the banana), relative to the narrowest
+   input contour. `reconstruct_designer.py` prints it and warns when the
+   ratio drops below 0.10. Validated: all three shapes pass at classical
+   and at c_bound=1.0; only the vase's real failure flags at 2.0.
+
+**What this means for the results you already gathered:** the synthetic
+numbers (sparsity sweep, global-constant ablation, cap ablation) are
+internally consistent and remain valid as reported at c_bound=2.0. Only the
+DESIGNER FIGURES are affected. For the final paper, retrain at c_bound=1.0
+so the figures and the tables come from the same model, and consider
+raising `--reg` if `C1min` still falls sharply.
+
+```bash
+python scripts/train_model.py --data data/synthetic --N 9 --m 256 \
+    --epochs 100 --c_bound 1.0 --surf_sub 8000 --gt_sub 8000 \
+    --val_every 5 --val_subset 25 --patience 30 --out runs/synth_N9_c1
+python scripts/reconstruct_designer.py --ds vase --mode net \
+    --ckpt runs/synth_N9_c1/best.pt --c_bound 1.0
+```
+
+Worth a paragraph in the paper: bounding the multiplier is not merely a
+regularizer, it is a GEOMETRIC SAFETY constraint. The admissible
+amplification is set by the narrowest feature in the object, and an
+aggregate surface metric will not detect a violation.
