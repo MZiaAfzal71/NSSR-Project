@@ -144,3 +144,42 @@ Worth a paragraph in the paper: bounding the multiplier is not merely a
 regularizer, it is a GEOMETRIC SAFETY constraint. The admissible
 amplification is set by the narrowest feature in the object, and an
 aggregate surface metric will not detect a violation.
+
+
+## CORRECTION: c_bound alone does not guarantee axis clearance
+
+An earlier note here said c_bound=1.0 was "safe on all three designer
+shapes". That was measured with UNIFORM parameter perturbations, which is
+not what the network produces. Re-measured with PER-ROW variation:
+
+| c_bound | vase worst clearance ratio | apple worst |
+|---:|---:|---:|
+| 1.0 | **0.002 crosses** | **0.003 crosses** |
+| 0.7 | 0.636 safe | **0.024 crosses** |
+| 0.5 | 0.883 safe | 0.826 safe |
+| 0.35 | 0.953 safe | 1.000 safe |
+
+So only c_bound <= 0.5 is safe under per-row variation. That explains why
+the 35-epoch c_bound=1.0 checkpoint rendered the vase correctly while the
+100-epoch one did not: the shorter run simply landed in a safe
+configuration by chance; longer training found an unsafe one. It was never
+guaranteed.
+
+**Fix that needs no GPU: an axis-clearance PROJECTION at render time.**
+`reconstruct_designer.py` now scales the predicted TANGENT parameters by
+the largest factor alpha in (0,1] that keeps the surface clear of the
+object's axis. It is a no-op when the prediction is already safe. On a
+measured failure case it restored clearance from 0.002 to 0.15 while
+retaining **91%** of the learned correction -- far better than reverting to
+classical, and far better than globally shrinking c_bound (which would cost
+accuracy everywhere to prevent a failure that only occurs on a few narrow
+features).
+
+On by default; `--no_safe_render` disables it, `--min_clearance` sets the
+target. Cap parameters are not scaled (they do not cause axis crossings).
+
+This is worth a short method paragraph: the bound on the multiplier is a
+GLOBAL constraint, but the admissible amplification is a LOCAL property of
+the geometry -- it depends on the narrowest feature the patch spans. A
+projection onto the feasible set respects that locality; a single global
+bound cannot.

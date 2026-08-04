@@ -52,6 +52,8 @@ CHECKS = [
      "ParamNet predicts s_bh/s_th (per-object cap heights)"),
     ("nssr/losses.py", "chamfer_weighted", None,
      "cap weighting applies to BOTH Chamfer directions (not subsampling)"),
+    ("scripts/reconstruct_designer.py", "def project_to_safe", None,
+     "axis-clearance projection (safe render without retraining)"),
     ("nssr/metrics.py", "def axis_clearance", None,
      "axis-clearance diagnostic catches surfaces collapsing onto the axis"),
     ("scripts/train_model.py", "--c_bound", None,

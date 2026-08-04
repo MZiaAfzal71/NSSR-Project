@@ -52,6 +52,46 @@ def freeze_cap_params(params):
     return out
 
 
+
+def project_to_safe(obj, params, n_u, surf_fn, min_ratio=0.15, iters=18):
+    """Scale the predicted tangent parameters by the largest alpha in (0,1]
+    that keeps the surface clear of the object's axis.
+
+    Why this is needed: bounding the multiplier by c_bound does NOT
+    guarantee axis clearance. Measured on the vase, with PER-ROW parameter
+    variation (which is what the network actually produces, unlike a
+    uniform sweep): c_bound=1.0 can still drive clearance to 0.002, and
+    c_bound=0.7 still fails on the apple. Only c_bound<=0.5 was safe under
+    per-row variation for both shapes -- but that bound costs accuracy
+    everywhere, to prevent a failure that occurs on a few narrow features.
+
+    This is a PROJECTION onto the feasible set instead: it leaves safe
+    predictions untouched (alpha=1) and scales back only when the geometry
+    demands it. On a measured failure case it restored clearance from
+    0.002 to 0.15 while retaining 91% of the learned correction.
+
+    Cap parameters (s_fB/s_fC/s_bh/s_th) are not scaled: they do not drive
+    axis crossings, and shrinking them would undo the learned cap shape.
+    """
+    tangent_keys = ("s_a", "s_b", "s_tau")
+    scale = lambda a: {k: (v * a if k in tangent_keys else v)
+                       for k, v in params.items()}
+    ratio0 = axis_clearance(surf_fn(obj, params, n_u), obj["R"])[1]
+    if ratio0 >= min_ratio:
+        return params, 1.0, ratio0, ratio0
+    lo, hi = 0.0, 1.0
+    for _ in range(iters):
+        mid = (lo + hi) / 2
+        if axis_clearance(surf_fn(obj, scale(mid), n_u),
+                          obj["R"])[1] >= min_ratio:
+            lo = mid
+        else:
+            hi = mid
+    out = scale(lo)
+    return out, lo, ratio0, axis_clearance(surf_fn(obj, out, n_u),
+                                           obj["R"])[1]
+
+
 def load_designer(ds, n1, device, dtype):
     pre = preprocess_designer(ds, n1=n1)
     T = lambda x: torch.as_tensor(np.asarray(x), device=device, dtype=dtype)
@@ -254,6 +294,15 @@ def main():
     ap.add_argument("--ckpt", default="runs/exp1/best.pt")
     ap.add_argument("--n1", type=int, default=25)
     ap.add_argument("--n_u", type=int, default=40)
+    ap.add_argument("--no_safe_render", action="store_true",
+                    help="disable the axis-clearance projection (on by "
+                         "default). The projection scales the predicted "
+                         "TANGENT parameters by the largest factor that "
+                         "keeps the surface off the object's axis; it is a "
+                         "no-op when the prediction is already safe.")
+    ap.add_argument("--min_clearance", type=float, default=0.15,
+                    help="clearance target for the projection, as a "
+                         "fraction of the narrowest input contour")
     ap.add_argument("--freeze_caps", action="store_true",
                     help="hold the boundary scalings s_fB/s_fC at the "
                          "CLASSICAL values while still using the learned "
@@ -338,6 +387,14 @@ def main():
     if a.freeze_caps:
         label += ", caps frozen"
     label += ")"
+    if not a.no_safe_render and a.mode != "classical":
+        params, alpha, r0, r1 = project_to_safe(
+            obj, params, a.n_u, surf, min_ratio=a.min_clearance)
+        if alpha < 1.0:
+            print(f"axis-clearance projection: ratio {r0:.3f} -> {r1:.3f} "
+                  f"(alpha={alpha:.3f}, retained {alpha*100:.0f}% of the "
+                  f"learned correction)")
+            S = surf(obj, params, a.n_u)
     clr, ratio = axis_clearance(S, obj["R"])
     print(f"axis clearance: {clr:.4f} ({ratio*100:.1f}% of the narrowest "
           f"input contour)")
