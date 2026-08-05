@@ -79,6 +79,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default="", help="dataset dir (test_N*.pkl)")
     ap.add_argument("--meshes", default="", help="or a mesh directory")
+    ap.add_argument("--axis_select", choices=["longest", "search"],
+                    default="longest",
+                    help="only used with --meshes (raw mesh dir path); "
+                         "--data pickles already have their axis baked in "
+                         "at make_mesh_dataset.py build time. 'search' "
+                         "fixes disk/washer-shaped objects like "
+                         "thingi_59126 that 'longest' slices into thin, "
+                         "elongated contours -- see nssr.slicing.")
     ap.add_argument("--N", type=int, default=9)
     ap.add_argument("--m", type=int, default=256)
     ap.add_argument("--n_u", type=int, default=28)
@@ -127,7 +135,8 @@ def main():
         for p in sorted(paths):
             if len(samples) >= a.n:
                 break
-            s, reason = make_sample_from_mesh(p, N=a.N)
+            s, reason = make_sample_from_mesh(p, N=a.N,
+                                              axis_select=a.axis_select)
             if s is None:
                 print(f"  skip {os.path.basename(p)}: {reason}")
                 continue

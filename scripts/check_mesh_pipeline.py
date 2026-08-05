@@ -23,6 +23,15 @@ def main():
     ap.add_argument("--N", type=int, default=9)
     ap.add_argument("--m", type=int, default=128)
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--axis_select", choices=["longest", "search"],
+                    default="longest",
+                    help="'longest': original longest-extent-to-z heuristic. "
+                         "'search': try all 3 axes, keep the one giving the "
+                         "roundest cross-sections -- fixes disk/washer/lens-"
+                         "shaped meshes the longest-extent rule slices badly "
+                         "(see nssr.slicing._best_slicing_axis). Also prints "
+                         "the mean slice elongation for both modes per mesh "
+                         "so you can see whether a given mesh needs it.")
     a = ap.parse_args()
 
     try:
@@ -32,7 +41,8 @@ def main():
               "pip install trimesh shapely --break-system-packages")
         return 1
 
-    from nssr.slicing import load_and_normalize, slice_mesh, make_sample_from_mesh
+    from nssr.slicing import (load_and_normalize, slice_mesh,
+                              make_sample_from_mesh, _elongation)
     from nssr.preprocess import preprocess_object
     from nssr.geometry_np import hermite_surface_np, zero_params_np
 
@@ -52,7 +62,8 @@ def main():
     for p in paths:
         name = os.path.basename(p)
         try:
-            mesh = load_and_normalize(p)
+            mesh = load_and_normalize(p, axis_select=a.axis_select,
+                                      N_probe=a.N)
         except Exception as e:                        # noqa: BLE001
             print(f"[FAIL] {name:16s} load/normalize: {e}")
             reasons.setdefault(str(e)[:60], 0)
@@ -69,6 +80,9 @@ def main():
             continue
         contours, Z = sl
         npts = [len(c) for c in contours]
+        elong = np.mean([_elongation(c) for c in contours])
+        elong_flag = "  ** elongated cross-sections -- try --axis_select search **" \
+            if elong > 2.0 else ""
 
         pre = preprocess_object(contours, Z, m=a.m)
         p0 = zero_params_np(pre["R"].shape[0], pre["R"].shape[1])
@@ -93,7 +107,8 @@ def main():
         print(f"[ OK ] {name:16s} volume {vol_sign} | slice pts "
               f"{min(npts)}-{max(npts)} | Bh={pre['Bh']:+.3f} "
               f"Th={pre['Th']:+.3f} | finite={finite} | "
-              f"classical mean surface err={d.mean():.4f}")
+              f"mean elongation={elong:.2f} | "
+              f"classical mean surface err={d.mean():.4f}{elong_flag}")
 
     print(f"\nkept {kept}/{len(paths)}")
     if reasons:

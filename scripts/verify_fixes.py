@@ -74,6 +74,20 @@ CHECKS = [
      "explicit section->2D frame so slices share a common frame"),
     ("nssr/slicing.py", "poly.interiors", None,
      "slices with holes are rejected"),
+    ("nssr/slicing.py", "def _best_slicing_axis", None,
+     "axis_select='search' fixes disk/washer-shaped meshes (e.g. "
+     "thingi_59126) that longest-extent-to-z slices into thin, elongated "
+     "contours -- picks the axis giving the roundest cross-sections "
+     "instead"),
+    ("nssr/slicing.py", "def _elongation", None,
+     "PCA aspect-ratio score used to rank candidate slicing axes"),
+    ("scripts/make_mesh_dataset.py", "--axis_select", None,
+     "axis_select is exposed at dataset-build time"),
+    ("scripts/check_mesh_pipeline.py", "--axis_select", None,
+     "axis_select is exposed at mesh-validation time, with a mean "
+     "elongation readout flagging meshes that likely need it"),
+    ("scripts/visualize_real.py", "--axis_select", None,
+     "axis_select is exposed when re-slicing raw meshes for figures"),
     ("scripts/fetch_thingi10k.py", "euler=2", "@ACTIVE_FILTER:solid",
      "Thingi10K filter uses euler=2 (genus 0), not the unpopulated "
      "solid/manifold columns"),

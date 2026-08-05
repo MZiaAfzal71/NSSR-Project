@@ -55,6 +55,14 @@ def main():
     ap.add_argument("--no_crown_circular", dest="crown_circular",
                     action="store_false")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--axis_select", choices=["longest", "search"],
+                    default="longest",
+                    help="'longest': stand the longest bbox extent up "
+                         "along z (original heuristic, right for elongated "
+                         "objects). 'search': try all 3 axes and keep the "
+                         "one giving the roundest cross-sections (fixes "
+                         "disk/washer/lens-shaped objects -- see "
+                         "nssr.slicing._best_slicing_axis).")
     a = ap.parse_args()
 
     try:
@@ -78,7 +86,8 @@ def main():
             try:
                 s, reason = make_sample_from_mesh(
                     p, N=N, base_circular=a.base_circular,
-                    crown_circular=a.crown_circular)
+                    crown_circular=a.crown_circular,
+                    axis_select=a.axis_select)
             except Exception as e:                     # noqa: BLE001
                 rejected.setdefault(f"{type(e).__name__}: {e}"[:70],
                                     []).append(p)
