@@ -1,23 +1,18 @@
 """Validate NSSR-V2 reconstructions on a dataset split.
 
-Compares classical and learned reconstructions and reports:
-- Chamfer / Hausdorff / normal metrics when GT is available;
-- negative signed-Jacobian fraction;
-- degenerate Jacobian fraction;
-- curvature violations;
-- tangent violations;
-- overall geometric validity.
-
-Intentional cap poles are excluded from Jacobian/curvature failure counting:
-the exact tip of a closed cap is a parameterization singularity by design,
-not a fold.
+Corrected version:
+- builds a classical geometry first to obtain a fixed pointwise reference normal;
+- recomputes BOTH classical and learned Jacobians against the same reference;
+- excludes intentional cap-pole singularities;
+- reports orientation/degeneracy validity separately from curvature diagnostics.
 
 Usage:
     python scripts/validate.py \
         --data data/synthetic \
+        --split test \
         --N 7 \
-        --ckpt runs/v2_geom/best.pt \
-        --out results/validate_N7.csv
+        --ckpt runs/smoke_jac/best.pt \
+        --out results/smoke_jac_validate.csv
 """
 
 from __future__ import annotations
@@ -40,13 +35,6 @@ from nssr.train import to_torch
 
 
 def intentional_pole_mask(surface_shape, closed_top: bool, device):
-    """Mask samples that are singular by cap construction, not by failure.
-
-    surface shape: (P, n_u, m, 3)
-
-    Base cap collapses at u=0.
-    Closed crown cap collapses at u=1.
-    """
     P, n_u, m, _ = surface_shape
     mask = torch.zeros(P, n_u, m, dtype=torch.bool, device=device)
     mask[0, 0, :] = True
@@ -55,12 +43,27 @@ def intentional_pole_mask(surface_shape, closed_top: bool, device):
     return mask
 
 
-def classical_reference(obj, n_u):
+def build_classical(obj, n_u):
     N, m = obj["R"].shape[:2]
     p0 = zero_params(N, m, device=obj["R"].device, dtype=obj["R"].dtype)
 
+    # Pass 1: obtain the classical pointwise normal field.
     with torch.no_grad():
-        return evaluate_geometry(
+        base = evaluate_geometry(
+            obj["R"], obj["Z"], obj["RB"], obj["RC"], obj["Bh"], obj["Th"],
+            p0,
+            n_u=n_u,
+            closed_top=obj.get("closed_top", True),
+            base_circular=obj.get("base_circular", True),
+            crown_circular=obj.get("crown_circular", True),
+            compute_jacobian=False,
+            compute_curvature=False,
+            run_validation=False,
+        )
+
+        # Pass 2: score classical geometry against that SAME fixed reference
+        # used later for the learned reconstruction.
+        geom = evaluate_geometry(
             obj["R"], obj["Z"], obj["RB"], obj["RC"], obj["Bh"], obj["Th"],
             p0,
             n_u=n_u,
@@ -70,7 +73,10 @@ def classical_reference(obj, n_u):
             compute_jacobian=True,
             compute_curvature=True,
             run_validation=False,
+            reference_normal=base.surface.normals,
         )
+
+    return geom, base.surface.normals
 
 
 def learned_params(net, obj):
@@ -80,21 +86,9 @@ def learned_params(net, obj):
     return net(feats)
 
 
-def safe_fraction(mask, ignore=None):
-    if ignore is not None:
-        mask = mask & (~ignore)
-        denom = (~ignore).sum()
-    else:
-        denom = torch.tensor(mask.numel(), device=mask.device)
-    if int(denom) == 0:
-        return float("nan")
-    return float(mask.sum().item() / int(denom))
-
-
 def summarize_geometry(geom, pole_mask, max_abs_curvature):
     jac = geom.jacobian
     curv = geom.curvature
-
     eval_mask = ~pole_mask
 
     neg = jac.flipped_mask & eval_mask
@@ -105,32 +99,30 @@ def summarize_geometry(geom, pole_mask, max_abs_curvature):
     kmag = torch.maximum(torch.abs(k1), torch.abs(k2))
     curv_bad = (kmag > max_abs_curvature) & eval_mask
 
-    valid = (
-        (~neg)
-        & (~deg)
-        & (~curv_bad)
-        & eval_mask
+    denom = max(int(eval_mask.sum().item()), 1)
+
+    # Keep topology/orientation validity separate from curvature diagnostics.
+    jacobian_valid = (
+        int(neg.sum().item()) == 0
+        and int(deg.sum().item()) == 0
     )
 
-    denom = int(eval_mask.sum().item())
+    curvature_valid = int(curv_bad.sum().item()) == 0
 
     return {
         "negative_jacobian": int(neg.sum().item()),
-        "negative_fraction": float(neg.sum().item() / max(denom, 1)),
+        "negative_fraction": float(neg.sum().item() / denom),
         "degenerate": int(deg.sum().item()),
-        "degenerate_fraction": float(deg.sum().item() / max(denom, 1)),
+        "degenerate_fraction": float(deg.sum().item() / denom),
+        "jacobian_valid": bool(jacobian_valid),
         "curvature_violations": int(curv_bad.sum().item()),
+        "curvature_valid": bool(curvature_valid),
         "max_abs_curvature": float(
             kmag[eval_mask].amax().item() if bool(eval_mask.any()) else float("nan")
         ),
-        "valid": bool(
-            int(neg.sum().item()) == 0
-            and int(deg.sum().item()) == 0
-            and int(curv_bad.sum().item()) == 0
-        ),
-        "valid_fraction": float(
-            valid.sum().item() / max(denom, 1)
-        ),
+        # Overall validity retained for compatibility, but do not use this as
+        # the sole sweep gate until curvature sampling is further hardened.
+        "valid": bool(jacobian_valid and curvature_valid),
     }
 
 
@@ -172,7 +164,6 @@ def main():
     path = os.path.join(a.data, f"{a.split}_N{a.N}.pkl")
     with open(path, "rb") as f:
         samples = pickle.load(f)
-
     if a.limit:
         samples = samples[:a.limit]
 
@@ -195,7 +186,8 @@ def main():
         for i, sample in enumerate(samples):
             obj = to_torch(sample, a.m, dev, dt, seed=40000 + i)
 
-            classical = classical_reference(obj, a.n_u)
+            classical, reference_normal = build_classical(obj, a.n_u)
+
             pole_mask = intentional_pole_mask(
                 classical.surface.xyz.shape,
                 obj.get("closed_top", True),
@@ -228,7 +220,7 @@ def main():
                     compute_jacobian=True,
                     compute_curvature=True,
                     run_validation=False,
-                    reference_normal=classical.surface.normals,
+                    reference_normal=reference_normal,
                 )
 
                 lsum = summarize_geometry(
@@ -238,29 +230,28 @@ def main():
                 )
                 lm = gt_metrics(obj, learned)
 
-                row.update(
-                    {f"learned_{k}": v for k, v in lm.items()}
-                )
-                row.update(
-                    {f"learned_geom_{k}": v for k, v in lsum.items()}
-                )
+                row.update({f"learned_{k}": v for k, v in lm.items()})
+                row.update({f"learned_geom_{k}": v for k, v in lsum.items()})
 
             rows.append(row)
 
-            status = "OK"
-            if net is not None and not row["learned_geom_valid"]:
-                status = "INVALID"
-
-            print(
-                f"[{status:7s}] {i:4d} "
-                f"classical neg={100*csum['negative_fraction']:.3f}% "
-                f"deg={100*csum['degenerate_fraction']:.3f}%"
-                + (
-                    f" | learned neg={100*row['learned_geom_negative_fraction']:.3f}% "
-                    f"deg={100*row['learned_geom_degenerate_fraction']:.3f}%"
-                    if net is not None else ""
+            if net is not None:
+                status = "OK" if row["learned_geom_jacobian_valid"] else "J-FAIL"
+                print(
+                    f"[{status:6s}] {i:4d} "
+                    f"classical neg={100*csum['negative_fraction']:.3f}% "
+                    f"deg={100*csum['degenerate_fraction']:.3f}% | "
+                    f"learned neg={100*row['learned_geom_negative_fraction']:.3f}% "
+                    f"deg={100*row['learned_geom_degenerate_fraction']:.3f}% "
+                    f"curv_bad={row['learned_geom_curvature_violations']}"
                 )
-            )
+            else:
+                print(
+                    f"[CLASS ] {i:4d} "
+                    f"neg={100*csum['negative_fraction']:.3f}% "
+                    f"deg={100*csum['degenerate_fraction']:.3f}% "
+                    f"curv_bad={csum['curvature_violations']}"
+                )
 
     if not rows:
         raise RuntimeError("no samples to validate")
@@ -273,19 +264,22 @@ def main():
         w.writeheader()
         w.writerows(rows)
 
-    print("\\nsummary")
+    print("\nsummary")
     for prefix in ("classical", "learned"):
-        key = f"{prefix}_geom_valid"
+        key = f"{prefix}_geom_jacobian_valid"
         if key not in rows[0]:
             continue
 
-        valid_rate = np.mean([float(r[key]) for r in rows])
+        jac_valid = np.mean([float(r[key]) for r in rows])
+        full_valid = np.mean([float(r[f"{prefix}_geom_valid"]) for r in rows])
         neg = np.mean([r[f"{prefix}_geom_negative_fraction"] for r in rows])
         deg = np.mean([r[f"{prefix}_geom_degenerate_fraction"] for r in rows])
         curv = np.mean([r[f"{prefix}_geom_curvature_violations"] for r in rows])
 
         print(
-            f"{prefix:10s} valid={100*valid_rate:.1f}% "
+            f"{prefix:10s} "
+            f"J-valid={100*jac_valid:.1f}% "
+            f"full-valid={100*full_valid:.1f}% "
             f"mean negative-J={100*neg:.4f}% "
             f"mean degenerate={100*deg:.4f}% "
             f"mean curvature violations={curv:.2f}"
