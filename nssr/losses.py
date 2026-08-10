@@ -4,9 +4,9 @@ Active geometry safeguards
 --------------------------
 1. Signed-Jacobian barrier:
    discourages local orientation reversal / foldover.
-2. Cap radial-fold barrier:
-   discourages the base/crown cap from turning back toward its pole and
-   producing a visible loop while remaining locally Jacobian-valid.
+2. Cap radial/meridional turn-back barrier:
+   discourages the base/crown cap from reversing progress and producing a
+   visible loop while remaining locally Jacobian-valid.
 
 Curvature is intentionally NOT part of the training objective.  The sampled
 finite-difference curvature estimator remains available as a diagnostic under
@@ -516,20 +516,27 @@ def geometry_regularization_loss(
     geometry_topk_fraction: float = 0.05,
     closed_top: bool = True,
 ):
-    """Dimensionless local geometry safety loss.
+    """Dimensionless local orientation safety loss.
 
-    The single public ``lam_jacobian`` weight now controls two complementary
-    scale-independent terms:
+    Active training now uses ONLY the normalized orientation barrier
 
-    1. orientation barrier:
-           signed / area_scale >= jacobian_margin
+        orientation = signed_jacobian / area_scale
 
-    2. area-degeneracy barrier:
-           area_scale / median(area_scale) >= 0.05
+        relu(jacobian_margin - orientation)^power
 
-    Both use the worst ``geometry_topk_fraction`` of evaluable samples.
+    reduced over the worst ``geometry_topk_fraction`` of evaluable samples.
 
-    Exact constructed cap poles are excluded.  Curvature is not involved.
+    Why the area-degeneracy term is excluded from training
+    -------------------------------------------------------
+    NSSR cap patches intentionally taper toward collapsed poles.  Even after
+    excluding the exact pole rows, near-pole samples naturally have much
+    smaller area than the global body median.  A global normalized-area barrier
+    therefore penalizes valid classical cap tapering and produces a non-zero
+    Jacobian loss even for the 100%-valid classical baseline.
+
+    Degeneracy remains a validation diagnostic via ``jacobian.degenerate_mask``;
+    it is simply not part of the active optimization objective unless future
+    experiments demonstrate a real degeneracy failure mode.
     """
     device = geometry.surface.xyz.device
     dtype = geometry.surface.xyz.dtype
@@ -563,17 +570,10 @@ def geometry_regularization_loss(
         topk_fraction=geometry_topk_fraction,
     )
 
-    l_area = jacobian_area_barrier_loss(
-        jac.area_scale,
-        valid_mask=evaluable,
-        relative_margin=0.05,
-        power=jacobian_power,
-        topk_fraction=geometry_topk_fraction,
-    )
-
-    # Equal internal weighting keeps the public API simple.  Both terms are
-    # dimensionless and approximately O(1) when materially violated.
-    l_jac = l_orientation + l_area
+    # Kept in the returned diagnostics for API/logging compatibility.
+    # It is deliberately zero in the active loss.
+    l_area = zero
+    l_jac = l_orientation
 
     return lam_jacobian * l_jac, {
         "jacobian": l_jac,
