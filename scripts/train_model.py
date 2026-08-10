@@ -186,6 +186,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=2.0,
     )
 
+    parser.add_argument(
+        "--cap_fold_margin",
+        type=float,
+        default=1e-3,
+    )
+
+    parser.add_argument(
+        "--geometry_topk",
+        type=float,
+        default=0.05,
+    )
+
+    parser.add_argument(
+        "--jacobian_power",
+        type=float,
+        default=2.0,
+    )
+
     # ------------------------------------------------------------------
     # Model constraints / cap handling
     # ------------------------------------------------------------------
@@ -320,6 +338,8 @@ def main():
     print(f"  patch samples n_u   : {args.n_u}")
     print(f"  dtype               : {dtype}")
     print(f"  geometry losses     : {'ON' if geometry_enabled else 'OFF'}")
+    print(f"  cap fold margin     : {args.cap_fold_margin:g}")
+    print(f"  geometry top-k      : {100 * args.geometry_topk:.1f}%")
 
     if geometry_enabled:
         print(f"  lambda Jacobian     : {args.lam_jacobian:g}")
@@ -338,6 +358,9 @@ def main():
         lam_n=args.lam_n,
         lam_r=args.lam_r,
         lam_s=args.lam_s,
+        cap_fold_margin=args.cap_fold_margin,
+        geometry_topk_fraction=args.geometry_topk,
+        jacobian_power=args.jacobian_power,
         lam_jacobian=args.lam_jacobian,
         jacobian_margin=args.jacobian_margin,
         lam_cap_fold=args.lam_cap_fold,
