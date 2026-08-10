@@ -22,6 +22,7 @@ from nssr.safety import (
     classical_geometry_and_reference,
     params_from_net,
     project_all_to_safe,
+    project_staged_to_safe,
 )
 from nssr.train import to_torch
 
@@ -59,6 +60,10 @@ def main():
     ap.add_argument("--no_learn_heights", action="store_true")
     ap.add_argument("--max_cap_fold", type=float, default=1e-3)
     ap.add_argument("--projection_iters", type=int, default=40)
+    ap.add_argument(
+        "--projection_mode", choices=("staged", "global"), default="staged",
+        help="staged tries tangent-only first; global scales all corrections",
+    )
     ap.add_argument("--fp64", action="store_true")
     a = ap.parse_args()
 
@@ -86,6 +91,7 @@ def main():
     print(f"  safety samples n_u : {a.n_u}")
     print(f"  c_bound            : {a.c_bound:g}")
     print(f"  cap threshold      : {a.max_cap_fold:g}")
+    print(f"  projection mode    : {a.projection_mode}")
     print("  safety source      : nssr.safety (shared with validate.py)")
 
     net = ParamNet(
@@ -113,24 +119,44 @@ def main():
             )
             params = params_from_net(net, obj)
 
-            (
-                _,
-                alpha,
-                raw_safety,
-                raw_metrics,
-                post_safety,
-                post_metrics,
-            ) = project_all_to_safe(
-                obj,
-                params,
-                a.n_u,
-                reference_normal,
-                max_cap_fold=a.max_cap_fold,
-                max_iter=a.projection_iters,
-                with_metrics=True,
-            )
+            if a.projection_mode == "staged":
+                (
+                    _,
+                    alpha,
+                    stage,
+                    raw_safety,
+                    raw_metrics,
+                    post_safety,
+                    post_metrics,
+                ) = project_staged_to_safe(
+                    obj,
+                    params,
+                    a.n_u,
+                    reference_normal,
+                    max_cap_fold=a.max_cap_fold,
+                    max_iter=a.projection_iters,
+                    with_metrics=True,
+                )
+            else:
+                (
+                    _,
+                    alpha,
+                    raw_safety,
+                    raw_metrics,
+                    post_safety,
+                    post_metrics,
+                ) = project_all_to_safe(
+                    obj,
+                    params,
+                    a.n_u,
+                    reference_normal,
+                    max_cap_fold=a.max_cap_fold,
+                    max_iter=a.projection_iters,
+                    with_metrics=True,
+                )
+                stage = "none" if alpha >= 1.0 - 1e-9 else "all"
 
-            activated = alpha < 1.0 - 1e-9
+            activated = stage != "none"
 
             row = {
                 "index": i,
@@ -157,6 +183,7 @@ def main():
                     raw_metrics.get("hausdorff", float("nan")),
 
                 "projection_activated": int(activated),
+                "projection_stage": stage,
                 "alpha": float(alpha),
                 "retained_percent": 100.0 * float(alpha),
 
@@ -195,7 +222,7 @@ def main():
                 f"J={'OK' if raw_safety['jacobian_valid'] else 'FAIL':4s} "
                 f"cap={raw_safety['cap_fold_max']:.5f} "
                 f"-> {'SAFE' if post_safety['safe'] else 'FAIL':4s} "
-                f"{'alpha='+format(alpha,'.3f') if activated else 'unchanged'}"
+                f"{stage + ' alpha=' + format(alpha,'.3f') if activated else 'unchanged'}"
             )
 
     os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
@@ -239,6 +266,19 @@ def main():
         )
     else:
         print("alpha on projected objects: no projection required")
+
+    for stage_name in ("tangent", "all"):
+        stage_rows = [
+            r for r in rows if r["projection_stage"] == stage_name
+        ]
+        if stage_rows:
+            stage_alphas = [r["alpha"] for r in stage_rows]
+            print(
+                f"{stage_name} stage: {len(stage_rows)}/{len(rows)} "
+                f"| alpha mean={np.mean(stage_alphas):.4f} "
+                f"median={np.median(stage_alphas):.4f} "
+                f"min={np.min(stage_alphas):.4f}"
+            )
 
     print(
         f"Chamfer L2 mean: "

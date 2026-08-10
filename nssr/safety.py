@@ -302,6 +302,178 @@ def project_all_to_safe(
     )
 
 
+
+def _scaled_selected_params(params, alpha, keys):
+    """Scale only selected correction groups; preserve all other parameters."""
+    keyset = set(keys)
+    out = {}
+    for k, v in params.items():
+        out[k] = alpha * v if k in keyset else v
+    return out
+
+
+@torch.no_grad()
+def _binary_search_projection(
+    obj,
+    params,
+    keys,
+    n_u,
+    reference_normal,
+    max_cap_fold,
+    max_iter,
+    with_metrics,
+):
+    """Find the largest safe alpha when scaling only ``keys``.
+
+    Returns ``None`` if the alpha=0 endpoint for this stage is not safe.
+    """
+    p0 = _scaled_selected_params(params, 0.0, keys)
+    _, s0, m0 = evaluate_params(
+        obj,
+        p0,
+        n_u,
+        reference_normal,
+        max_cap_fold=max_cap_fold,
+        with_metrics=with_metrics,
+    )
+    if not s0["safe"]:
+        return None
+
+    lo, hi = 0.0, 1.0
+    best_params = p0
+    best_safety = s0
+    best_metrics = m0
+
+    for _ in range(max_iter):
+        mid = 0.5 * (lo + hi)
+        cand = _scaled_selected_params(params, mid, keys)
+        _, cs, cm = evaluate_params(
+            obj,
+            cand,
+            n_u,
+            reference_normal,
+            max_cap_fold=max_cap_fold,
+            with_metrics=with_metrics,
+        )
+        if cs["safe"]:
+            lo = mid
+            best_params = cand
+            best_safety = cs
+            best_metrics = cm
+        else:
+            hi = mid
+
+    return best_params, lo, best_safety, best_metrics
+
+
+@torch.no_grad()
+def project_staged_to_safe(
+    obj,
+    params,
+    n_u,
+    reference_normal,
+    max_cap_fold=1e-3,
+    max_iter=40,
+    with_metrics=True,
+):
+    """Staged sampled-safety projection.
+
+    Projection policy
+    -----------------
+    1. If raw reconstruction is already SAFE, keep it unchanged.
+    2. For any unsafe reconstruction, first try scaling only tangent controls
+       ``s_a``, ``s_b``, and ``s_tau``.
+    3. If tangent-only scaling cannot reach a safe endpoint, fall back to
+       scaling all learned correction parameters toward the classical solution.
+
+    This preserves the current global projection as a guaranteed fallback
+    whenever the classical endpoint is sampled-safe.
+
+    Returns:
+        projected_params,
+        alpha,
+        stage,               # "none", "tangent", or "all"
+        raw_safety,
+        raw_metrics,
+        post_safety,
+        post_metrics
+    """
+    if max_iter < 1:
+        raise ValueError("max_iter must be >= 1")
+
+    _, raw_safety, raw_metrics = evaluate_params(
+        obj,
+        params,
+        n_u,
+        reference_normal,
+        max_cap_fold=max_cap_fold,
+        with_metrics=with_metrics,
+    )
+
+    if raw_safety["safe"]:
+        return (
+            params,
+            1.0,
+            "none",
+            raw_safety,
+            raw_metrics,
+            raw_safety,
+            raw_metrics,
+        )
+
+    tangent_keys = ("s_a", "s_b", "s_tau")
+    tangent = _binary_search_projection(
+        obj,
+        params,
+        tangent_keys,
+        n_u,
+        reference_normal,
+        max_cap_fold,
+        max_iter,
+        with_metrics,
+    )
+    if tangent is not None:
+        p, alpha, safety_out, metrics_out = tangent
+        return (
+            p,
+            alpha,
+            "tangent",
+            raw_safety,
+            raw_metrics,
+            safety_out,
+            metrics_out,
+        )
+
+    # Final guaranteed fallback: scale all learned corrections.
+    all_keys = tuple(params.keys())
+    all_result = _binary_search_projection(
+        obj,
+        params,
+        all_keys,
+        n_u,
+        reference_normal,
+        max_cap_fold,
+        max_iter,
+        with_metrics,
+    )
+    if all_result is None:
+        raise RuntimeError(
+            "Classical endpoint is not sampled-safe under the shared "
+            "Jacobian/cap safety definition."
+        )
+
+    p, alpha, safety_out, metrics_out = all_result
+    return (
+        p,
+        alpha,
+        "all",
+        raw_safety,
+        raw_metrics,
+        safety_out,
+        metrics_out,
+    )
+
+
 __all__ = [
     "zero_params_like",
     "classical_geometry_and_reference",
@@ -312,4 +484,5 @@ __all__ = [
     "scaled_params",
     "evaluate_params",
     "project_all_to_safe",
+    "project_staged_to_safe",
 ]
