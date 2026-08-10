@@ -270,7 +270,7 @@ def scale_params(params, alpha):
     return {k: v * alpha for k, v in params.items()}
 
 
-def project_to_safe(
+def _project_params_to_sampled_safe(
     obj,
     params,
     n_u,
@@ -395,6 +395,115 @@ def export_npz(path, geom, obj, params):
     np.savez_compressed(path, **arrays)
 
 
+
+def _sampled_safety(obj, params, n_u, max_cap_fold):
+    """Evaluate final sampled NSSR safety: Jacobian-valid AND cap-safe."""
+    ref = evaluate_geometry(
+        obj["R"], obj["Z"], obj["RB"], obj["RC"],
+        obj["Bh"], obj["Th"],
+        _zero_params_like(obj),
+        n_u=n_u,
+        closed_top=obj.get("closed_top", True),
+        base_circular=obj.get("base_circular", True),
+        crown_circular=obj.get("crown_circular", True),
+        compute_jacobian=False,
+        compute_curvature=False,
+        run_validation=False,
+    ).surface.normals.detach()
+
+    geom = evaluate_geometry(
+        obj["R"], obj["Z"], obj["RB"], obj["RC"],
+        obj["Bh"], obj["Th"],
+        params,
+        n_u=n_u,
+        closed_top=obj.get("closed_top", True),
+        base_circular=obj.get("base_circular", True),
+        crown_circular=obj.get("crown_circular", True),
+        compute_jacobian=True,
+        compute_curvature=False,
+        run_validation=False,
+        reference_normal=ref,
+    )
+
+    evaluable = ~intentional_pole_mask(
+        geom.surface.xyz,
+        closed_top=obj.get("closed_top", True),
+    )
+    jac = geom.jacobian
+    neg = jac.flipped_mask & evaluable
+    deg = jac.degenerate_mask & evaluable
+
+    cap = float(
+        cap_radial_fold_max(
+            geom.surface.xyz,
+            obj["RB"],
+            obj["RC"],
+            closed_top=obj.get("closed_top", True),
+        ).item()
+    )
+
+    j_valid = bool(
+        (neg.sum() == 0).item()
+        and (deg.sum() == 0).item()
+    )
+    cap_safe = cap <= max_cap_fold
+
+    return {
+        "geometry": geom,
+        "j_valid": j_valid,
+        "cap_safe": cap_safe,
+        "safe": bool(j_valid and cap_safe),
+        "negative_count": int(neg.sum().item()),
+        "degenerate_count": int(deg.sum().item()),
+        "cap_fold": cap,
+    }
+
+
+def _scale_all_params(params, alpha):
+    out = {}
+    for k, v in params.items():
+        out[k] = alpha * v
+    return out
+
+
+def _project_params_to_sampled_safe(
+    obj,
+    params,
+    n_u,
+    max_cap_fold=1e-3,
+    max_iter=40,
+):
+    """Scale all learned corrections toward classical until sampled SAFE."""
+    initial = _sampled_safety(obj, params, n_u, max_cap_fold)
+    if initial["safe"]:
+        return params, 1.0, initial
+
+    classical = _scale_all_params(params, 0.0)
+    cstate = _sampled_safety(obj, classical, n_u, max_cap_fold)
+    if not cstate["safe"]:
+        raise RuntimeError(
+            "Classical endpoint is not safe under the requested sampled "
+            "Jacobian/cap constraints."
+        )
+
+    lo, hi = 0.0, 1.0
+    best = classical
+    best_state = cstate
+
+    for _ in range(max_iter):
+        mid = 0.5 * (lo + hi)
+        cand = _scale_all_params(params, mid)
+        state = _sampled_safety(obj, cand, n_u, max_cap_fold)
+        if state["safe"]:
+            lo = mid
+            best = cand
+            best_state = state
+        else:
+            hi = mid
+
+    return best, lo, best_state
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", default="")
@@ -477,7 +586,7 @@ def main():
     alpha = 1.0
 
     if a.project_safe and a.mode != "classical" and not raw_safety["safe"]:
-        final_params, final_geom, final_safety, alpha = project_to_safe(
+        final_params, final_geom, final_safety, alpha = _project_params_to_sampled_safe(
             obj,
             params,
             a.n_u,

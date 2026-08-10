@@ -23,7 +23,12 @@ import matplotlib.pyplot as plt
 from nssr.preprocess import preprocess_designer
 from nssr.geometry import hermite_surface, zero_params, surface_points
 from nssr.networks import ParamNet, contour_features
-from nssr.losses import _nn_sqdist, cap_radial_fold_loss, cap_radial_fold_max
+from nssr.losses import (
+    _nn_sqdist,
+    cap_radial_fold_loss,
+    cap_radial_fold_max,
+    intentional_pole_mask,
+)
 from nssr.metrics import axis_clearance
 
 
@@ -70,71 +75,161 @@ def cap_fold_ratio(obj, S):
     )
 
 
-def _safe_state(obj, params, n_u, surf_fn, min_ratio, max_cap_fold):
-    S = surf_fn(obj, params, n_u)
-    ratio = axis_clearance(S, obj["R"])[1]
-    fold = cap_fold_ratio(obj, S)
-    return S, ratio, fold, (ratio >= min_ratio and fold <= max_cap_fold)
+def _jacobian_valid_state(obj, params, n_u):
+    """Return sampled Jacobian validity outside intentional cap poles."""
+    geom = evaluate_geometry(
+        obj["R"], obj["Z"], obj["RB"], obj["RC"],
+        obj["Bh"], obj["Th"],
+        params,
+        n_u=n_u,
+        closed_top=obj.get("closed_top", True),
+        base_circular=obj.get("base_circular", True),
+        crown_circular=obj.get("crown_circular", True),
+        compute_jacobian=True,
+        compute_curvature=False,
+        run_validation=False,
+        reference_normal=_classical_reference_normal(obj, n_u),
+    )
+
+    jac = geom.jacobian
+    evaluable = ~intentional_pole_mask(
+        geom.surface.xyz,
+        closed_top=obj.get("closed_top", True),
+    )
+
+    neg = jac.flipped_mask & evaluable
+    deg = jac.degenerate_mask & evaluable
+
+    return (
+        bool((neg.sum() == 0).item() and (deg.sum() == 0).item()),
+        int(neg.sum().item()),
+        int(deg.sum().item()),
+        geom,
+    )
+
+
+def _safe_state(obj, params, n_u, max_cap_fold):
+    """Combined inference safety state: axis + Jacobian + cap turn-back."""
+    S = hermite_surface(
+        obj["R"], obj["Z"], obj["RB"], obj["RC"],
+        obj["Bh"], obj["Th"], params,
+        n_u=n_u,
+        closed_top=obj.get("closed_top", True),
+        base_circular=obj.get("base_circular", True),
+        crown_circular=obj.get("crown_circular", True),
+    )
+
+    axis = axis_clearance_ratio(S, obj["R"])
+    cap = float(
+        cap_radial_fold_max(
+            S,
+            obj["RB"],
+            obj["RC"],
+            closed_top=obj.get("closed_top", True),
+        ).item()
+    )
+
+    j_valid, neg_count, deg_count, _ = _jacobian_valid_state(
+        obj, params, n_u
+    )
+
+    return {
+        "axis": float(axis),
+        "cap": cap,
+        "j_valid": j_valid,
+        "neg_count": neg_count,
+        "deg_count": deg_count,
+        "safe": bool(
+            axis >= 1.0
+            and j_valid
+            and cap <= max_cap_fold
+        ),
+    }
 
 
 def project_to_safe(
     obj,
     params,
     n_u,
-    surf_fn,
-    min_ratio=0.15,
     max_cap_fold=1e-3,
-    iters=18,
+    max_iter=40,
 ):
-    """Project learned corrections toward classical until geometry is safe.
+    """Project learned corrections toward classical until all safety tests pass.
 
-    Safety now requires BOTH:
-      1. sufficient axis clearance;
-      2. no meaningful cap radial turn-back.
+    Stage 1 scales only tangent-related corrections (s_a, s_b, s_tau).
+    Stage 2, if necessary, scales all learned corrections.
 
-    Stage 1 scales only tangent modulation (preserving learned cap controls).
-    If that cannot remove the cap loop, Stage 2 scales all learned corrections.
-    Since alpha=0 is the classical solution, the second stage has a known safe
-    endpoint whenever the classical reconstruction is safe.
+    Feasibility requires:
+      - axis clearance >= 1,
+      - no negative/degenerate sampled Jacobian outside intentional poles,
+      - cap turn-back <= max_cap_fold.
     """
-    S0, r0, f0, ok0 = _safe_state(
-        obj, params, n_u, surf_fn, min_ratio, max_cap_fold
-    )
-    if ok0:
-        return params, 1.0, r0, r0, f0, f0, "none"
+    initial = _safe_state(obj, params, n_u, max_cap_fold)
+    if initial["safe"]:
+        print(
+            "safety projection: already safe "
+            f"(J=OK, cap={initial['cap']:.5f}, axis={initial['axis']:.3f})"
+        )
+        return params, 1.0, "none"
 
     tangent_keys = ("s_a", "s_b", "s_tau")
 
-    # First try preserving cap-specific controls.
-    p_zero_tan = _scaled_params(params, 0.0, tangent_keys)
-    _, _, _, tangent_zero_safe = _safe_state(
-        obj, p_zero_tan, n_u, surf_fn, min_ratio, max_cap_fold
-    )
+    def scale_keys(alpha, keys):
+        return _scaled_params(params, alpha, keys=keys)
 
-    if tangent_zero_safe:
-        keys = tangent_keys
-        stage = "tangent"
-    else:
-        keys = tuple(params.keys())
-        stage = "all"
+    def search(keys):
+        zero = scale_keys(0.0, keys)
+        zstate = _safe_state(obj, zero, n_u, max_cap_fold)
+        if not zstate["safe"]:
+            return None, zstate
 
-    lo, hi = 0.0, 1.0
-    for _ in range(iters):
-        mid = (lo + hi) / 2.0
-        pm = _scaled_params(params, mid, keys)
-        _, _, _, ok = _safe_state(
-            obj, pm, n_u, surf_fn, min_ratio, max_cap_fold
+        lo, hi = 0.0, 1.0
+        best = zero
+        best_state = zstate
+        for _ in range(max_iter):
+            mid = 0.5 * (lo + hi)
+            cand = scale_keys(mid, keys)
+            state = _safe_state(obj, cand, n_u, max_cap_fold)
+            if state["safe"]:
+                lo = mid
+                best = cand
+                best_state = state
+            else:
+                hi = mid
+        return (best, lo), best_state
+
+    tangent_result, tangent_state = search(tangent_keys)
+    if tangent_result is not None:
+        projected, alpha = tangent_result
+        print(
+            "safety projection (tangent): "
+            f"axis {initial['axis']:.3f} -> {tangent_state['axis']:.3f}, "
+            f"J {'OK' if initial['j_valid'] else 'FAIL'} -> "
+            f"{'OK' if tangent_state['j_valid'] else 'FAIL'}, "
+            f"cap-turnback {initial['cap']:.5f} -> {tangent_state['cap']:.5f} "
+            f"(alpha={alpha:.3f}, retained {100*alpha:.0f}% correction)"
         )
-        if ok:
-            lo = mid
-        else:
-            hi = mid
+        return projected, alpha, "tangent"
 
-    out = _scaled_params(params, lo, keys)
-    _, r1, f1, _ = _safe_state(
-        obj, out, n_u, surf_fn, min_ratio, max_cap_fold
+    all_keys = tuple(params.keys())
+    all_result, all_state = search(all_keys)
+    if all_result is None:
+        raise RuntimeError(
+            "Classical endpoint of safety projection is not safe under "
+            "the requested sampled constraints."
+        )
+
+    projected, alpha = all_result
+    print(
+        "safety projection (all): "
+        f"axis {initial['axis']:.3f} -> {all_state['axis']:.3f}, "
+        f"J {'OK' if initial['j_valid'] else 'FAIL'} -> "
+        f"{'OK' if all_state['j_valid'] else 'FAIL'}, "
+        f"cap-turnback {initial['cap']:.5f} -> {all_state['cap']:.5f} "
+        f"(alpha={alpha:.3f}, retained {100*alpha:.0f}% correction)"
     )
-    return out, lo, r0, r1, f0, f1, stage
+    return projected, alpha, "all"
+
 
 def load_designer(ds, n1, device, dtype):
     pre = preprocess_designer(ds, n1=n1)
