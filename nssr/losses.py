@@ -233,21 +233,57 @@ def cap_radial_fold_measure(
     return base_violation, crown_violation
 
 
+def _topk_mean(
+    values: torch.Tensor,
+    *,
+    fraction: float = 0.05,
+) -> torch.Tensor:
+    """Mean of the largest ``fraction`` of a non-negative tensor.
+
+    Local geometric failures should not be diluted by thousands of safe
+    samples. ``fraction=1`` reproduces a global mean; the recommended training
+    value is 0.05 (worst 5%).
+    """
+    if not (0.0 < fraction <= 1.0):
+        raise ValueError("top-k fraction must lie in (0, 1]")
+
+    flat = values.reshape(-1)
+    if flat.numel() == 0:
+        return values.new_zeros(())
+
+    finite = flat[torch.isfinite(flat)]
+    if finite.numel() == 0:
+        return values.new_tensor(float("inf"))
+
+    k = max(1, int(round(fraction * finite.numel())))
+    k = min(k, finite.numel())
+    return torch.topk(
+        finite, k=k, largest=True, sorted=False
+    ).values.mean()
+
+
 def cap_radial_fold_loss(
     surface: torch.Tensor,
     RB: torch.Tensor,
     RC: torch.Tensor,
     *,
     closed_top: bool = True,
+    margin: float = 1e-3,
     power: float = 2.0,
-    reduction: str = "mean",
+    topk_fraction: float = 0.05,
+    reduction: str = "topk",
 ) -> torch.Tensor:
-    """Differentiable combined cap loop / turn-back loss.
+    """Barrier for localized cap loop / turn-back violations.
 
-    The public function name is retained so existing scripts do not need to be
-    changed.  It now penalizes both radial reversal and backward 3-D cap
-    progress.  Classical caps should remain approximately zero.
+    The cap measure already combines radial reversal and backward 3-D
+    meridional/chord progress. Training is aligned with validation via
+
+        excess = relu(turnback - margin)
+
+    and, by default, averages only the worst 5% of squared excesses.
     """
+    if margin < 0:
+        raise ValueError("margin must be >= 0")
     if power <= 0:
         raise ValueError("power must be > 0")
 
@@ -263,17 +299,21 @@ def cap_radial_fold_loss(
         pieces.append(c.reshape(-1))
 
     v = torch.cat(pieces)
-    p = v.pow(power)
+    excess = torch.relu(v - margin)
+    penalty = excess.pow(power)
 
+    if reduction == "topk":
+        return _topk_mean(penalty, fraction=topk_fraction)
     if reduction == "mean":
-        return p.mean() if p.numel() else surface.new_zeros(())
+        return penalty.mean() if penalty.numel() else surface.new_zeros(())
     if reduction == "sum":
-        return p.sum()
+        return penalty.sum()
     if reduction == "max":
-        return p.max() if p.numel() else surface.new_zeros(())
+        return penalty.max() if penalty.numel() else surface.new_zeros(())
     if reduction == "none":
-        return p
-    raise ValueError("reduction must be mean, sum, max, or none")
+        return penalty
+
+    raise ValueError("reduction must be topk, mean, sum, max, or none")
 
 
 def cap_radial_fold_max(
@@ -297,21 +337,51 @@ def cap_radial_fold_max(
     return v.max() if v.numel() else surface.new_zeros(())
 
 
+def jacobian_hard_barrier_loss(
+    signed_jacobian: torch.Tensor,
+    *,
+    margin: float = 1e-4,
+    valid_mask: Optional[torch.Tensor] = None,
+    power: float = 2.0,
+    topk_fraction: float = 0.05,
+) -> torch.Tensor:
+    """Top-k signed-Jacobian barrier.
+
+    Uses ``relu(margin - J)^power`` and averages only the worst fraction of
+    evaluable samples. Degenerate near-zero Jacobians are intentionally kept.
+    """
+    if margin < 0:
+        raise ValueError("margin must be >= 0")
+    if power <= 0:
+        raise ValueError("power must be > 0")
+
+    signed = signed_jacobian
+
+    if valid_mask is None:
+        mask = torch.isfinite(signed)
+    else:
+        mask = valid_mask.to(dtype=torch.bool, device=signed.device)
+        mask = mask & torch.isfinite(signed)
+
+    selected = signed[mask]
+    if selected.numel() == 0:
+        return signed.new_zeros(())
+
+    violation = torch.relu(margin - selected)
+    penalty = violation.pow(power)
+    return _topk_mean(penalty, fraction=topk_fraction)
+
+
 def geometry_regularization_loss(
     geometry: GeometryOutput,
     *,
     lam_jacobian: float = 0.0,
     jacobian_margin: float = 1.0e-4,
+    jacobian_power: float = 2.0,
+    geometry_topk_fraction: float = 0.05,
     closed_top: bool = True,
 ):
-    """Signed-Jacobian penalty with intentional poles excluded.
-
-    Important difference from the earlier implementation:
-    ``geometry.jacobian.valid_mask`` is NOT used as the barrier mask because it
-    excludes degenerate samples.  A degenerate sample has signed Jacobian near
-    zero and should be penalized.  Only known pole singularities (and non-finite
-    values that cannot safely enter arithmetic) are excluded.
-    """
+    """Hard-sample Jacobian regularization with intentional poles excluded."""
     device = geometry.surface.xyz.device
     dtype = geometry.surface.xyz.dtype
     zero = torch.zeros((), device=device, dtype=dtype)
@@ -329,12 +399,13 @@ def geometry_regularization_loss(
         geometry.surface.xyz,
         closed_top=closed_top,
     )
-    evaluable = evaluable & torch.isfinite(signed)
 
-    l_jac = jacobian_barrier_loss(
+    l_jac = jacobian_hard_barrier_loss(
         signed,
         margin=jacobian_margin,
         valid_mask=evaluable,
+        power=jacobian_power,
+        topk_fraction=geometry_topk_fraction,
     )
 
     return lam_jacobian * l_jac, {"jacobian": l_jac}
@@ -361,14 +432,17 @@ def total_loss(
     geometry: Optional[GeometryOutput] = None,
     lam_jacobian: float = 0.0,
     jacobian_margin: float = 1.0e-4,
+    jacobian_power: float = 2.0,
     lam_cap_fold: float = 0.0,
+    cap_fold_margin: float = 1.0e-3,
     cap_fold_power: float = 2.0,
+    geometry_topk_fraction: float = 0.05,
 ):
     """NSSR objective with active local- and cap-safety terms.
 
-    ``lam_cap_fold`` is the new targeted safeguard against visible cap loops.
-    It acts directly on the sampled cap geometry and therefore complements the
-    local signed-Jacobian term.
+    ``lam_cap_fold`` targets visible cap loops directly. Both geometry terms
+    use hard-sample top-k reduction so localized failures cannot be diluted by
+    the many safe samples on the surface.
     """
     from .networks import param_l2, param_smoothness
 
@@ -418,6 +492,8 @@ def total_loss(
             geometry,
             lam_jacobian=lam_jacobian,
             jacobian_margin=jacobian_margin,
+            jacobian_power=jacobian_power,
+            geometry_topk_fraction=geometry_topk_fraction,
             closed_top=closed_top,
         )
         l_jac = geo_parts["jacobian"]
@@ -433,7 +509,10 @@ def total_loss(
             RB,
             RC,
             closed_top=closed_top,
+            margin=cap_fold_margin,
             power=cap_fold_power,
+            topk_fraction=geometry_topk_fraction,
+            reduction="topk",
         )
 
     loss = (
@@ -466,6 +545,7 @@ __all__ = [
     "cap_radial_fold_measure",
     "cap_radial_fold_loss",
     "cap_radial_fold_max",
+    "jacobian_hard_barrier_loss",
     "geometry_regularization_loss",
     "total_loss",
 ]
