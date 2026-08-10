@@ -273,17 +273,25 @@ def cap_radial_fold_loss(
     topk_fraction: float = 0.05,
     reduction: str = "topk",
 ) -> torch.Tensor:
-    """Barrier for localized cap loop / turn-back violations.
+    """Dimensionless barrier for localized cap loop / turn-back violations.
 
-    The cap measure already combines radial reversal and backward 3-D
-    meridional/chord progress. Training is aligned with validation via
+    ``cap_radial_fold_measure`` returns a dimensionless turn-back measure ``v``.
+    Training is aligned with validation through the *relative* excess
 
-        excess = relu(turnback - margin)
+        excess = relu(v / margin - 1)
 
-    and, by default, averages only the worst 5% of squared excesses.
+    rather than the earlier absolute excess ``relu(v - margin)``.
+
+    This scaling is important: a cap with turn-back 0.015 against a safety
+    threshold of 0.001 is a 15x violation and receives a large penalty rather
+    than a tiny ~1e-4 squared absolute error.
+
+    The default reduction averages only the worst 5% of cap samples.
     """
-    if margin < 0:
-        raise ValueError("margin must be >= 0")
+    if margin <= 0:
+        raise ValueError(
+            "cap-fold margin must be > 0 for the normalized safety barrier"
+        )
     if power <= 0:
         raise ValueError("power must be > 0")
 
@@ -299,7 +307,9 @@ def cap_radial_fold_loss(
         pieces.append(c.reshape(-1))
 
     v = torch.cat(pieces)
-    excess = torch.relu(v - margin)
+
+    # Relative-to-threshold violation: 1.0 means exactly at the allowed limit.
+    excess = torch.relu(v / margin - 1.0)
     penalty = excess.pow(power)
 
     if reduction == "topk":
@@ -337,18 +347,142 @@ def cap_radial_fold_max(
     return v.max() if v.numel() else surface.new_zeros(())
 
 
+def jacobian_orientation_barrier_loss(
+    signed_jacobian: torch.Tensor,
+    area_scale: torch.Tensor,
+    *,
+    margin: float = 0.05,
+    valid_mask: Optional[torch.Tensor] = None,
+    power: float = 2.0,
+    topk_fraction: float = 0.05,
+    eps: float = 1e-12,
+) -> torch.Tensor:
+    """Scale-independent local orientation barrier.
+
+    ``signed_jacobian`` is the oriented area relative to the fixed classical
+    reference normal and ``area_scale`` is the unsigned local area magnitude.
+    Their ratio is therefore an orientation cosine-like quantity in [-1, 1]:
+
+        orientation = signed_jacobian / area_scale
+
+    Positive values preserve orientation; negative values are folded.
+    Penalizing this normalized quantity avoids dependence on object scale or
+    local parameterization density.
+
+    ``margin=0.05`` asks for a small positive orientation reserve instead of
+    merely J > 0.
+    """
+    if margin < 0:
+        raise ValueError("orientation margin must be >= 0")
+    if power <= 0:
+        raise ValueError("power must be > 0")
+
+    if valid_mask is None:
+        mask = torch.ones_like(signed_jacobian, dtype=torch.bool)
+    else:
+        mask = valid_mask.to(
+            dtype=torch.bool,
+            device=signed_jacobian.device,
+        )
+
+    mask = (
+        mask
+        & torch.isfinite(signed_jacobian)
+        & torch.isfinite(area_scale)
+        & (area_scale > eps)
+    )
+
+    signed = signed_jacobian[mask]
+    area = area_scale[mask]
+
+    if signed.numel() == 0:
+        return signed_jacobian.new_zeros(())
+
+    orientation = signed / area.clamp_min(eps)
+    violation = torch.relu(margin - orientation)
+    penalty = violation.pow(power)
+
+    return _topk_mean(
+        penalty,
+        fraction=topk_fraction,
+    )
+
+
+def jacobian_area_barrier_loss(
+    area_scale: torch.Tensor,
+    *,
+    valid_mask: Optional[torch.Tensor] = None,
+    relative_margin: float = 0.05,
+    power: float = 2.0,
+    topk_fraction: float = 0.05,
+    eps: float = 1e-12,
+) -> torch.Tensor:
+    """Explicit normalized area-degeneracy barrier.
+
+    The local unsigned area is normalized by the median evaluable area of the
+    current surface (detached from autograd):
+
+        area_ratio = area_scale / median(area_scale)
+
+    and samples below ``relative_margin`` are penalized.  This makes the
+    degeneracy term dimensionless and object-scale independent.
+
+    Exact cap poles must be removed by ``valid_mask`` before calling.
+    """
+    if relative_margin <= 0:
+        raise ValueError("relative area margin must be > 0")
+    if power <= 0:
+        raise ValueError("power must be > 0")
+
+    if valid_mask is None:
+        mask = torch.ones_like(area_scale, dtype=torch.bool)
+    else:
+        mask = valid_mask.to(
+            dtype=torch.bool,
+            device=area_scale.device,
+        )
+
+    mask = mask & torch.isfinite(area_scale) & (area_scale >= 0)
+
+    area = area_scale[mask]
+    if area.numel() == 0:
+        return area_scale.new_zeros(())
+
+    positive = area[area > eps]
+    if positive.numel() == 0:
+        # Entire evaluable surface has collapsed.
+        return area_scale.new_tensor(1.0)
+
+    # Reference scale is used only as normalization; detaching prevents the
+    # optimizer from gaming the denominator by globally inflating all areas.
+    ref = positive.detach().median().clamp_min(eps)
+    ratio = area / ref
+
+    # Relative form again: ratio == relative_margin is exactly at threshold.
+    violation = torch.relu(1.0 - ratio / relative_margin)
+    penalty = violation.pow(power)
+
+    return _topk_mean(
+        penalty,
+        fraction=topk_fraction,
+    )
+
+
 def jacobian_hard_barrier_loss(
     signed_jacobian: torch.Tensor,
     *,
-    margin: float = 1e-4,
+    margin: float = 0.05,
     valid_mask: Optional[torch.Tensor] = None,
     power: float = 2.0,
     topk_fraction: float = 0.05,
 ) -> torch.Tensor:
-    """Top-k signed-Jacobian barrier.
+    """Compatibility wrapper for older imports.
 
-    Uses ``relu(margin - J)^power`` and averages only the worst fraction of
-    evaluable samples. Degenerate near-zero Jacobians are intentionally kept.
+    This function cannot form the new normalized orientation term without an
+    ``area_scale`` tensor, so it retains a simple signed barrier only for
+    backward compatibility.  The active NSSR-V2 training path uses
+    ``geometry_regularization_loss`` below and therefore uses normalized
+    orientation + explicit area-degeneracy penalties.
     """
     if margin < 0:
         raise ValueError("margin must be >= 0")
@@ -356,7 +490,6 @@ def jacobian_hard_barrier_loss(
         raise ValueError("power must be > 0")
 
     signed = signed_jacobian
-
     if valid_mask is None:
         mask = torch.isfinite(signed)
     else:
@@ -368,47 +501,85 @@ def jacobian_hard_barrier_loss(
         return signed.new_zeros(())
 
     violation = torch.relu(margin - selected)
-    penalty = violation.pow(power)
-    return _topk_mean(penalty, fraction=topk_fraction)
+    return _topk_mean(
+        violation.pow(power),
+        fraction=topk_fraction,
+    )
 
 
 def geometry_regularization_loss(
     geometry: GeometryOutput,
     *,
     lam_jacobian: float = 0.0,
-    jacobian_margin: float = 1.0e-4,
+    jacobian_margin: float = 0.05,
     jacobian_power: float = 2.0,
     geometry_topk_fraction: float = 0.05,
     closed_top: bool = True,
 ):
-    """Hard-sample Jacobian regularization with intentional poles excluded."""
+    """Dimensionless local geometry safety loss.
+
+    The single public ``lam_jacobian`` weight now controls two complementary
+    scale-independent terms:
+
+    1. orientation barrier:
+           signed / area_scale >= jacobian_margin
+
+    2. area-degeneracy barrier:
+           area_scale / median(area_scale) >= 0.05
+
+    Both use the worst ``geometry_topk_fraction`` of evaluable samples.
+
+    Exact constructed cap poles are excluded.  Curvature is not involved.
+    """
     device = geometry.surface.xyz.device
     dtype = geometry.surface.xyz.dtype
     zero = torch.zeros((), device=device, dtype=dtype)
 
     if lam_jacobian == 0.0:
-        return zero, {"jacobian": zero}
+        return zero, {
+            "jacobian": zero,
+            "jacobian_orientation": zero,
+            "jacobian_area": zero,
+        }
 
     if geometry.jacobian is None:
         raise ValueError(
             "lam_jacobian is non-zero but geometry.jacobian is missing"
         )
 
-    signed = geometry.jacobian.signed
+    jac = geometry.jacobian
+
     evaluable = ~intentional_pole_mask(
         geometry.surface.xyz,
         closed_top=closed_top,
     )
 
-    l_jac = jacobian_hard_barrier_loss(
-        signed,
+    l_orientation = jacobian_orientation_barrier_loss(
+        jac.signed,
+        jac.area_scale,
         margin=jacobian_margin,
         valid_mask=evaluable,
         power=jacobian_power,
         topk_fraction=geometry_topk_fraction,
     )
 
-    return lam_jacobian * l_jac, {"jacobian": l_jac}
+    l_area = jacobian_area_barrier_loss(
+        jac.area_scale,
+        valid_mask=evaluable,
+        relative_margin=0.05,
+        power=jacobian_power,
+        topk_fraction=geometry_topk_fraction,
+    )
+
+    # Equal internal weighting keeps the public API simple.  Both terms are
+    # dimensionless and approximately O(1) when materially violated.
+    l_jac = l_orientation + l_area
+
+    return lam_jacobian * l_jac, {
+        "jacobian": l_jac,
+        "jacobian_orientation": l_orientation,
+        "jacobian_area": l_area,
+    }
 
 
 def total_loss(
@@ -431,7 +602,7 @@ def total_loss(
     closed_top: bool = True,
     geometry: Optional[GeometryOutput] = None,
     lam_jacobian: float = 0.0,
-    jacobian_margin: float = 1.0e-4,
+    jacobian_margin: float = 0.05,
     jacobian_power: float = 2.0,
     lam_cap_fold: float = 0.0,
     cap_fold_margin: float = 1.0e-3,
@@ -545,6 +716,8 @@ __all__ = [
     "cap_radial_fold_measure",
     "cap_radial_fold_loss",
     "cap_radial_fold_max",
+    "jacobian_orientation_barrier_loss",
+    "jacobian_area_barrier_loss",
     "jacobian_hard_barrier_loss",
     "geometry_regularization_loss",
     "total_loss",
