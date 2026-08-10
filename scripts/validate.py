@@ -1,28 +1,7 @@
 """Validate NSSR-V2 reconstruction safety and accuracy.
 
-Final safety definition
------------------------
-A reconstruction is considered SAFE when:
-
-1. it has no negative signed-Jacobian samples relative to the fixed
-   classical pointwise orientation field;
-2. it has no accidental Jacobian degeneracy away from intentional cap poles;
-3. its maximum normalized cap radial turn-back is <= ``--max_cap_fold``.
-
-Curvature is deliberately excluded from validity.  ``nssr.core.curvature``
-may still be used separately for offline analysis.
-
-Usage:
-    python scripts/validate.py \
-        --data data/synthetic \
-        --split test \
-        --N 7 \
-        --ckpt runs/smoke_safe/best.pt \
-        --m 128 \
-        --n_u 16 \
-        --limit 20 \
-        --max_cap_fold 1e-3 \
-        --out results/smoke_safe_validate.csv
+Uses ``nssr.safety`` as the single source of truth for:
+    SAFE = Jacobian-valid AND cap-safe
 """
 
 from __future__ import annotations
@@ -38,14 +17,14 @@ import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from nssr.geometry import evaluate_geometry, surface_points, zero_params
-from nssr.losses import (
-    cap_radial_fold_max,
-    cap_radial_fold_measure,
-    intentional_pole_mask,
+from nssr.networks import ParamNet
+from nssr.safety import (
+    classical_geometry_and_reference,
+    geometry_from_params,
+    geometry_safety_summary,
+    params_from_net,
+    reconstruction_metrics,
 )
-from nssr.metrics import evaluate_surface
-from nssr.networks import ParamNet, contour_features
 from nssr.train import to_torch
 
 
@@ -53,157 +32,10 @@ def _load_state_dict(path, device, dtype):
     state = torch.load(path, map_location=device)
     if isinstance(state, dict) and "state_dict" in state:
         state = state["state_dict"]
-    return {k: v.to(dtype=dtype) for k, v in state.items()}
-
-
-def _classical_geometry(obj, n_u):
-    """Build classical surface twice so both variants use the same reference."""
-    N, m = obj["R"].shape[:2]
-    p0 = zero_params(
-        N,
-        m,
-        device=obj["R"].device,
-        dtype=obj["R"].dtype,
-    )
-
-    # Pass 1: fixed pointwise orientation reference.
-    ref = evaluate_geometry(
-        obj["R"], obj["Z"], obj["RB"], obj["RC"], obj["Bh"], obj["Th"],
-        p0,
-        n_u=n_u,
-        closed_top=obj.get("closed_top", True),
-        base_circular=obj.get("base_circular", True),
-        crown_circular=obj.get("crown_circular", True),
-        compute_jacobian=False,
-        compute_curvature=False,
-        run_validation=False,
-    )
-    reference_normal = ref.surface.normals.detach()
-
-    # Pass 2: score classical against exactly that field.
-    classical = evaluate_geometry(
-        obj["R"], obj["Z"], obj["RB"], obj["RC"], obj["Bh"], obj["Th"],
-        p0,
-        n_u=n_u,
-        closed_top=obj.get("closed_top", True),
-        base_circular=obj.get("base_circular", True),
-        crown_circular=obj.get("crown_circular", True),
-        compute_jacobian=True,
-        compute_curvature=False,
-        run_validation=False,
-        reference_normal=reference_normal,
-    )
-    return classical, reference_normal
-
-
-def _learned_geometry(net, obj, n_u, reference_normal):
-    feats = contour_features(
-        obj["R"], obj["Z"], obj["RB"], obj["RC"], obj["Bh"], obj["Th"]
-    )
-    params = net(feats)
-
-    geom = evaluate_geometry(
-        obj["R"], obj["Z"], obj["RB"], obj["RC"], obj["Bh"], obj["Th"],
-        params,
-        n_u=n_u,
-        closed_top=obj.get("closed_top", True),
-        base_circular=obj.get("base_circular", True),
-        crown_circular=obj.get("crown_circular", True),
-        compute_jacobian=True,
-        compute_curvature=False,
-        run_validation=False,
-        reference_normal=reference_normal,
-    )
-    return geom
-
-
-def _geometry_summary(geom, obj, max_cap_fold):
-    jac = geom.jacobian
-    if jac is None:
-        raise RuntimeError("Jacobian diagnostics were not computed")
-
-    eval_mask = ~intentional_pole_mask(
-        geom.surface.xyz,
-        closed_top=obj.get("closed_top", True),
-    )
-
-    # Count finite accidental failures explicitly.  Degenerate mask already
-    # includes non-finite derivative/area samples.
-    neg_mask = jac.flipped_mask & eval_mask
-    deg_mask = jac.degenerate_mask & eval_mask
-
-    denom = max(int(eval_mask.sum().item()), 1)
-    neg_count = int(neg_mask.sum().item())
-    deg_count = int(deg_mask.sum().item())
-
-    j_valid = (neg_count == 0 and deg_count == 0)
-
-    base_v, crown_v = cap_radial_fold_measure(
-        geom.surface.xyz,
-        obj["RB"],
-        obj["RC"],
-        closed_top=obj.get("closed_top", True),
-    )
-
-    base_max = float(base_v.max().item()) if base_v.numel() else 0.0
-    crown_max = float(crown_v.max().item()) if crown_v.numel() else 0.0
-    cap_max = float(
-        cap_radial_fold_max(
-            geom.surface.xyz,
-            obj["RB"],
-            obj["RC"],
-            closed_top=obj.get("closed_top", True),
-        ).item()
-    )
-    cap_safe = cap_max <= max_cap_fold
-    safe = j_valid and cap_safe
-
-    signed_eval = jac.signed[eval_mask]
-    finite_signed = signed_eval[torch.isfinite(signed_eval)]
-    minimum_signed = (
-        float(finite_signed.min().item())
-        if finite_signed.numel()
-        else float("nan")
-    )
-
-    area_eval = jac.area_scale[eval_mask]
-    finite_area = area_eval[torch.isfinite(area_eval)]
-    minimum_area = (
-        float(finite_area.min().item())
-        if finite_area.numel()
-        else float("nan")
-    )
-
     return {
-        "jacobian_valid": bool(j_valid),
-        "negative_jacobian": neg_count,
-        "negative_fraction": float(neg_count / denom),
-        "degenerate": deg_count,
-        "degenerate_fraction": float(deg_count / denom),
-        "minimum_signed_jacobian": minimum_signed,
-        "minimum_area_scale": minimum_area,
-        "base_cap_fold_max": base_max,
-        "crown_cap_fold_max": crown_max,
-        "cap_fold_max": cap_max,
-        "cap_safe": bool(cap_safe),
-        "safe": bool(safe),
+        k: v.to(device=device, dtype=dtype)
+        for k, v in state.items()
     }
-
-
-def _gt_metrics(obj, geom):
-    if obj.get("gt_pts") is None:
-        return {}
-
-    pts = surface_points(geom.surface.xyz)
-    nrms = geom.surface.normals.reshape(-1, 3)
-
-    result = evaluate_surface(
-        pts,
-        obj["gt_pts"],
-        nrms,
-        obj.get("gt_normals"),
-    )
-    return {k: float(v) for k, v in result.items()}
 
 
 def _mean(rows, key):
@@ -212,23 +44,22 @@ def _mean(rows, key):
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
     ap.add_argument("--data", default="data/synthetic")
     ap.add_argument("--split", default="test")
-    ap.add_argument("--N", type=int, default=7)
+    ap.add_argument("--N", type=int, default=15)
     ap.add_argument("--ckpt", default="")
     ap.add_argument("--m", type=int, default=256)
     ap.add_argument("--n_u", type=int, default=32)
+    ap.add_argument("--gt_sub", type=int, default=20000)
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--out", default="results/validate.csv")
     ap.add_argument("--c_bound", type=float, default=1.0)
     ap.add_argument("--no_learn_heights", action="store_true")
-    ap.add_argument(
-        "--max_cap_fold",
-        type=float,
-        default=1e-3,
-        help="maximum normalized radial cap turn-back considered safe",
-    )
+    ap.add_argument("--max_cap_fold", type=float, default=1e-3)
+    ap.add_argument("--seed_base", type=int, default=40000)
     ap.add_argument("--fp64", action="store_true")
     a = ap.parse_args()
 
@@ -241,7 +72,6 @@ def main():
 
     if a.limit > 0:
         samples = samples[:a.limit]
-
     if not samples:
         raise RuntimeError(f"empty split: {path}")
 
@@ -260,15 +90,20 @@ def main():
         for i, sample in enumerate(samples):
             obj = to_torch(
                 sample,
-                a.m,
-                device,
-                dtype,
-                seed=40_000 + i,
+                m=a.m,
+                device=device,
+                dtype=dtype,
+                gt_subsample=a.gt_sub,
+                seed=a.seed_base + i,
             )
 
-            classical, reference_normal = _classical_geometry(obj, a.n_u)
-            csum = _geometry_summary(classical, obj, a.max_cap_fold)
-            cmetrics = _gt_metrics(obj, classical)
+            classical, reference_normal = (
+                classical_geometry_and_reference(obj, a.n_u)
+            )
+            csum = geometry_safety_summary(
+                classical, obj, a.max_cap_fold
+            )
+            cmetrics = reconstruction_metrics(obj, classical)
 
             row = {
                 "idx": i,
@@ -277,14 +112,14 @@ def main():
             }
 
             if net is not None:
-                learned = _learned_geometry(
-                    net,
-                    obj,
-                    a.n_u,
-                    reference_normal,
+                params = params_from_net(net, obj)
+                learned = geometry_from_params(
+                    obj, params, a.n_u, reference_normal
                 )
-                lsum = _geometry_summary(learned, obj, a.max_cap_fold)
-                lmetrics = _gt_metrics(obj, learned)
+                lsum = geometry_safety_summary(
+                    learned, obj, a.max_cap_fold
+                )
+                lmetrics = reconstruction_metrics(obj, learned)
 
                 row.update(
                     {f"learned_{k}": v for k, v in lmetrics.items()}
@@ -319,10 +154,10 @@ def main():
             rows.append(row)
 
     os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
-
-    fieldnames = list(rows[0].keys())
     with open(a.out, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(
+            f, fieldnames=list(rows[0].keys())
+        )
         writer.writeheader()
         writer.writerows(rows)
 
@@ -338,7 +173,6 @@ def main():
         neg = _mean(rows, f"{prefix}_geom_negative_fraction")
         deg = _mean(rows, f"{prefix}_geom_degenerate_fraction")
         cap = _mean(rows, f"{prefix}_geom_cap_fold_max")
-
         worst_cap = max(
             float(r[f"{prefix}_geom_cap_fold_max"])
             for r in rows
