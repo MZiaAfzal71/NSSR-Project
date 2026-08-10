@@ -35,6 +35,13 @@ from nssr.losses import (
     intentional_pole_mask,
 )
 from nssr.metrics import axis_clearance
+from nssr.safety import (
+    classical_geometry_and_reference,
+    geometry_from_params,
+    geometry_safety_summary,
+    project_staged_to_safe,
+    scaled_params,
+)
 
 
 
@@ -191,105 +198,100 @@ def project_to_safe(
     max_cap_fold=1e-3,
     iters=18,
 ):
-    """Project learned corrections toward classical until geometry is safe.
+    """Designer projection using the shared NSSR J/cap projector.
 
-    IMPORTANT: this intentionally preserves the original call signature and
-    seven-value return contract used by main():
+    The shared failure-aware policy is authoritative for Jacobian/cap safety:
+      - cap-only failure -> global scaling;
+      - Jacobian failure -> tangent-only, then global fallback.
 
+    Designer rendering adds one extra constraint: axis clearance.  If the
+    shared J/cap result still violates ``min_ratio``, a final global line
+    search is performed while rechecking BOTH axis clearance and the same
+    shared J/cap safety definition.
+
+    The original seven-value public return contract is preserved:
         params, alpha, r0, r1, f0, f1, stage
-
-    Safety now requires all three:
-      1. axis clearance >= min_ratio;
-      2. no sampled negative/degenerate Jacobian outside intentional poles;
-      3. cap turn-back <= max_cap_fold.
-
-    Stage 1 scales tangent modulation only.  If the tangent-zero endpoint is
-    not safe, Stage 2 scales all learned corrections toward the classical
-    solution.
     """
-    reference_normal = _classical_reference_normal(obj, n_u)
+    _, reference_normal = classical_geometry_and_reference(obj, n_u)
 
-    s0 = _safe_state(
-        obj, params, n_u, surf_fn,
-        min_ratio, max_cap_fold,
-        reference_normal=reference_normal,
+    raw_geom = geometry_from_params(
+        obj, params, n_u, reference_normal
     )
-    if s0["safe"]:
-        return (
-            params, 1.0,
-            s0["ratio"], s0["ratio"],
-            s0["fold"], s0["fold"],
-            "none",
-        )
+    raw_safety = geometry_safety_summary(
+        raw_geom, obj, max_cap_fold
+    )
+    raw_surface = surf_fn(obj, params, n_u)
+    r0 = float(axis_clearance(raw_surface, obj["R"])[1])
+    f0 = float(raw_safety["cap_fold_max"])
 
-    tangent_keys = ("s_a", "s_b", "s_tau")
-
-    # First try preserving cap-specific controls.
-    p_zero_tan = _scaled_params(params, 0.0, tangent_keys)
-    st = _safe_state(
-        obj, p_zero_tan, n_u, surf_fn,
-        min_ratio, max_cap_fold,
-        reference_normal=reference_normal,
+    # First enforce the canonical shared Jacobian/cap safety policy.
+    (
+        projected,
+        alpha,
+        stage,
+        _,
+        _,
+        post_safety,
+        _,
+    ) = project_staged_to_safe(
+        obj,
+        params,
+        n_u,
+        reference_normal,
+        max_cap_fold=max_cap_fold,
+        max_iter=iters,
+        with_metrics=False,
     )
 
-    if st["safe"]:
-        keys = tangent_keys
-        stage = "tangent"
-    else:
-        keys = tuple(params.keys())
-        stage = "all"
+    post_surface = surf_fn(obj, projected, n_u)
+    r1 = float(axis_clearance(post_surface, obj["R"])[1])
+    f1 = float(post_safety["cap_fold_max"])
 
-        # alpha=0 for all parameters is the classical endpoint.  Verify it is
-        # actually safe under the exact requested checks before binary search.
-        p_classical = _scaled_params(params, 0.0, keys)
-        sc = _safe_state(
-            obj, p_classical, n_u, surf_fn,
-            min_ratio, max_cap_fold,
-            reference_normal=reference_normal,
+    if r1 >= min_ratio:
+        return projected, alpha, r0, r1, f0, f1, stage
+
+    # Designer-only fallback: scale all original corrections toward the
+    # classical endpoint until axis clearance AND shared J/cap safety pass.
+    def designer_state(p):
+        geom = geometry_from_params(obj, p, n_u, reference_normal)
+        safety = geometry_safety_summary(geom, obj, max_cap_fold)
+        S = surf_fn(obj, p, n_u)
+        ratio = float(axis_clearance(S, obj["R"])[1])
+        return safety, ratio
+
+    classical = scaled_params(params, 0.0)
+    c_safety, c_ratio = designer_state(classical)
+    if not c_safety["safe"] or c_ratio < min_ratio:
+        raise RuntimeError(
+            "Classical endpoint is not safe under the requested "
+            "axis/Jacobian/cap constraints."
         )
-        if not sc["safe"]:
-            raise RuntimeError(
-                "Classical endpoint is not safe under the requested "
-                "axis/Jacobian/cap constraints."
-            )
 
     lo, hi = 0.0, 1.0
+    best = classical
+    best_safety = c_safety
+    best_ratio = c_ratio
+
     for _ in range(iters):
         mid = 0.5 * (lo + hi)
-        pm = _scaled_params(params, mid, keys)
-        sm = _safe_state(
-            obj, pm, n_u, surf_fn,
-            min_ratio, max_cap_fold,
-            reference_normal=reference_normal,
-        )
-        if sm["safe"]:
+        cand = scaled_params(params, mid)
+        cand_safety, cand_ratio = designer_state(cand)
+        if cand_safety["safe"] and cand_ratio >= min_ratio:
             lo = mid
+            best = cand
+            best_safety = cand_safety
+            best_ratio = cand_ratio
         else:
             hi = mid
 
-    out = _scaled_params(params, lo, keys)
-    s1 = _safe_state(
-        obj, out, n_u, surf_fn,
-        min_ratio, max_cap_fold,
-        reference_normal=reference_normal,
-    )
-
-    print(
-        f"  Jacobian safety: "
-        f"{'OK' if s0['j_valid'] else 'FAIL'} -> "
-        f"{'OK' if s1['j_valid'] else 'FAIL'} "
-        f"(negative {s0['negative']} -> {s1['negative']}, "
-        f"degenerate {s0['degenerate']} -> {s1['degenerate']})"
-    )
-
     return (
-        out,
+        best,
         lo,
-        s0["ratio"],
-        s1["ratio"],
-        s0["fold"],
-        s1["fold"],
-        stage,
+        r0,
+        best_ratio,
+        f0,
+        float(best_safety["cap_fold_max"]),
+        "axis_all",
     )
 
 
@@ -638,12 +640,17 @@ def main():
     clr, ratio = axis_clearance(S, obj["R"])
     print(f"axis clearance: {clr:.4f} ({ratio*100:.1f}% of the narrowest "
           f"input contour)")
-    print(f"cap turn-back max: {cap_fold_ratio(obj, S):.6f}")
-    jfinal = _jacobian_state(obj, params, a.n_u)
+    _, final_ref = classical_geometry_and_reference(obj, a.n_u)
+    final_geom = geometry_from_params(obj, params, a.n_u, final_ref)
+    final_safety = geometry_safety_summary(
+        final_geom, obj, a.max_cap_fold
+    )
+    print(f"cap turn-back max: {final_safety['cap_fold_max']:.6f}")
     print(
-        f"Jacobian validity: {'OK' if jfinal['valid'] else 'FAIL'} "
-        f"(negative={jfinal['negative']}, "
-        f"degenerate={jfinal['degenerate']})"
+        f"Jacobian validity: "
+        f"{'OK' if final_safety['jacobian_valid'] else 'FAIL'} "
+        f"(negative={final_safety['negative_jacobian']}, "
+        f"degenerate={final_safety['degenerate']})"
     )
     if ratio < 0.10:
         print("  WARNING: the surface is collapsing onto the object axis. "

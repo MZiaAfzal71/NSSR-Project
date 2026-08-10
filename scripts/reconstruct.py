@@ -57,6 +57,12 @@ from nssr.losses import (
 )
 from nssr.metrics import evaluate_surface
 from nssr.networks import ParamNet, contour_features
+from nssr.safety import (
+    classical_geometry_and_reference,
+    geometry_from_params,
+    geometry_safety_summary,
+    project_staged_to_safe,
+)
 from nssr.preprocess import preprocess_object
 
 
@@ -525,7 +531,8 @@ def main():
     ap.add_argument(
         "--project_safe",
         action="store_true",
-        help="scale learned corrections toward classical if raw output fails",
+        help=("apply shared failure-aware projection: cap-only -> global; "
+              "Jacobian-fail -> tangent then global fallback"),
     )
     ap.add_argument("--projection_iters", type=int, default=20)
     ap.add_argument("--fp64", action="store_true")
@@ -563,36 +570,46 @@ def main():
         a.c_bound,
     )
 
-    reference_normal = classical_reference_normal(
-        obj,
-        a.n_u,
+    _, reference_normal = classical_geometry_and_reference(
+        obj, a.n_u
     )
 
-    raw_geom = evaluate(
-        obj,
-        params,
-        a.n_u,
-        reference_normal,
+    raw_geom = geometry_from_params(
+        obj, params, a.n_u, reference_normal
     )
-    raw_safety = safety_summary(
-        raw_geom,
-        obj,
-        a.max_cap_fold,
+    raw_safety = geometry_safety_summary(
+        raw_geom, obj, a.max_cap_fold
     )
 
     final_params = params
     final_geom = raw_geom
     final_safety = raw_safety
     alpha = 1.0
+    projection_stage = "none"
 
     if a.project_safe and a.mode != "classical" and not raw_safety["safe"]:
-        final_params, final_geom, final_safety, alpha = _project_params_to_sampled_safe(
+        (
+            final_params,
+            alpha,
+            projection_stage,
+            raw_safety_shared,
+            _,
+            final_safety,
+            _,
+        ) = project_staged_to_safe(
             obj,
             params,
             a.n_u,
             reference_normal,
-            a.max_cap_fold,
-            iters=a.projection_iters,
+            max_cap_fold=a.max_cap_fold,
+            max_iter=a.projection_iters,
+            with_metrics=False,
+        )
+        # These should be identical to the already-computed raw state because
+        # both paths use the same shared safety implementation.
+        raw_safety = raw_safety_shared
+        final_geom = geometry_from_params(
+            obj, final_params, a.n_u, reference_normal
         )
 
     report = {
@@ -605,7 +622,9 @@ def main():
         "raw_safety": raw_safety,
         "projection": {
             "enabled": bool(a.project_safe),
-            "applied": bool(alpha < 1.0),
+            "applied": bool(projection_stage != "none"),
+            "stage": projection_stage,
+            "policy": "failure_aware_shared",
             "alpha": float(alpha),
             "retained_correction_percent": float(100.0 * alpha),
         },
@@ -653,8 +672,8 @@ def main():
 
     if alpha < 1.0:
         print(
-            f"safety projection: alpha={alpha:.6f} "
-            f"({100*alpha:.1f}% correction retained)"
+            f"safety projection ({projection_stage}): alpha={alpha:.6f} "
+            f"({100*alpha:.1f}% of projected group retained)"
         )
         print(
             f"  final cap fold: {final_safety['cap_fold_max']:.6f}\n"

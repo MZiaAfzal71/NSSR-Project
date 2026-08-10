@@ -1,20 +1,12 @@
-"""Collect NSSR-V2 evaluation and safety CSVs into final summary tables.
+"""Collect final NSSR-V2 multi-N safety/projection results.
 
-Expected naming convention
---------------------------
-Evaluation:
-    results/eval_N5_baseline.csv
-    results/eval_N5_safe.csv
-    ...
+Input files produced by ``run_full_sweep.py``:
+    N{N}_validate.csv
+    N{N}_projection.csv
 
-Validation:
-    results/validate_N5_baseline.csv
-    results/validate_N5_safe.csv
-    ...
-
-The collector reports accuracy AND the two active safety mechanisms:
-signed-Jacobian validity and radial cap-fold safety.  Curvature is intentionally
-not part of the final summary.
+The final table reports raw classical/learned accuracy, raw sampled safety,
+post-projection safety, activation/stage rates, retained alpha by stage, and
+projection-induced reconstruction error.
 """
 
 from __future__ import annotations
@@ -29,8 +21,8 @@ import re
 import numpy as np
 
 
-EVAL_RE = re.compile(r"eval_N(\d+)_(.+)\.csv$")
-VAL_RE = re.compile(r"validate_N(\d+)_(.+)\.csv$")
+VAL_RE = re.compile(r"N(\d+)_validate\.csv$")
+PROJ_RE = re.compile(r"N(\d+)_projection\.csv$")
 
 
 def read_csv(path):
@@ -38,96 +30,86 @@ def read_csv(path):
         return list(csv.DictReader(f))
 
 
-def _to_float(value):
+def fval(x):
     try:
-        return float(value)
+        return float(x)
     except (TypeError, ValueError):
         return float("nan")
 
 
-def numeric_values(rows, key):
-    vals = []
+def values(rows, key):
+    out = []
     for r in rows:
-        v = _to_float(r.get(key))
-        if math.isfinite(v):
-            vals.append(v)
-    return vals
+        x = fval(r.get(key))
+        if math.isfinite(x):
+            out.append(x)
+    return out
 
 
-def numeric_mean(rows, key):
-    vals = numeric_values(rows, key)
-    return float(np.mean(vals)) if vals else float("nan")
+def mean(rows, key):
+    v = values(rows, key)
+    return float(np.mean(v)) if v else float("nan")
 
 
-def numeric_min(rows, key):
-    vals = numeric_values(rows, key)
-    return float(np.min(vals)) if vals else float("nan")
+def vmax(rows, key):
+    v = values(rows, key)
+    return float(np.max(v)) if v else float("nan")
 
 
-def numeric_max(rows, key):
-    vals = numeric_values(rows, key)
-    return float(np.max(vals)) if vals else float("nan")
+def vmin(rows, key):
+    v = values(rows, key)
+    return float(np.min(v)) if v else float("nan")
 
 
-def pct_improvement(classical, learned, higher_is_better=False):
-    if not (math.isfinite(classical) and math.isfinite(learned)):
-        return float("nan")
-    denom = max(abs(classical), 1e-12)
-    if higher_is_better:
-        return 100.0 * (learned - classical) / denom
-    return 100.0 * (classical - learned) / denom
+def median(rows, key):
+    v = values(rows, key)
+    return float(np.median(v)) if v else float("nan")
 
 
-def discover(pattern, regex):
+def discover(results, pattern, regex):
     found = {}
-    for path in sorted(glob.glob(pattern)):
-        match = regex.search(os.path.basename(path))
-        if not match:
-            continue
-        key = (int(match.group(1)), match.group(2))
-        found[key] = path
+    for path in glob.glob(os.path.join(results, pattern)):
+        m = regex.search(os.path.basename(path))
+        if m:
+            found[int(m.group(1))] = path
     return found
 
 
+def stage_rows(rows, stage):
+    return [r for r in rows if r.get("projection_stage") == stage]
+
+
+def pct_delta(old, new):
+    if not (math.isfinite(old) and math.isfinite(new)):
+        return float("nan")
+    if abs(old) < 1e-12:
+        return float("nan")
+    return 100.0 * (new - old) / abs(old)
+
+
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--results", default="results")
-    ap.add_argument("--out", default="results/summary.csv")
-    ap.add_argument(
-        "--safety_out",
-        default="",
-        help="optional separate classical-vs-learned safety summary CSV",
+    ap = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
+    ap.add_argument("--results", default="results/final_sweep")
+    ap.add_argument("--out", default="results/final_sweep/summary.csv")
     a = ap.parse_args()
 
-    eval_files = discover(
-        os.path.join(a.results, "eval_N*_*.csv"),
-        EVAL_RE,
-    )
-    val_files = discover(
-        os.path.join(a.results, "validate_N*_*.csv"),
-        VAL_RE,
-    )
-
-    keys = sorted(set(eval_files) | set(val_files))
-    if not keys:
-        raise RuntimeError(
-            f"no eval_N*_*.csv or validate_N*_*.csv files found in {a.results}"
-        )
+    vals = discover(a.results, "N*_validate.csv", VAL_RE)
+    projs = discover(a.results, "N*_projection.csv", PROJ_RE)
+    Ns = sorted(set(vals) | set(projs))
+    if not Ns:
+        raise RuntimeError(f"no N*_validate/projection CSVs found in {a.results}")
 
     summary = []
-    safety_rows = []
 
-    for N, variant in keys:
-        row = {
-            "N": N,
-            "variant": variant,
-        }
+    for N in Ns:
+        row = {"N": N}
 
-        eval_path = eval_files.get((N, variant))
-        if eval_path:
-            erows = read_csv(eval_path)
+        if N in vals:
+            vr = read_csv(vals[N])
 
+            # Accuracy from the shared validator.
             for metric in (
                 "chamfer_l2",
                 "chamfer_l1",
@@ -135,170 +117,159 @@ def main():
                 "hausdorff95",
                 "normal_consistency",
             ):
-                c = numeric_mean(erows, f"classical_{metric}")
-                l = numeric_mean(erows, f"learned_{metric}")
+                ck = f"classical_{metric}"
+                lk = f"learned_{metric}"
+                if ck in vr[0]:
+                    row[ck] = mean(vr, ck)
+                if lk in vr[0]:
+                    row[lk] = mean(vr, lk)
 
-                row[f"classical_{metric}"] = c
-                row[metric] = l
-                row[f"{metric}_improvement_pct"] = pct_improvement(
-                    c,
-                    l,
-                    higher_is_better=(metric == "normal_consistency"),
-                )
+            # Canonical raw safety.
+            row.update({
+                "classical_j_valid_rate": mean(
+                    vr, "classical_geom_jacobian_valid"
+                ),
+                "classical_cap_safe_rate": mean(
+                    vr, "classical_geom_cap_safe"
+                ),
+                "classical_safe_rate": mean(
+                    vr, "classical_geom_safe"
+                ),
+                "raw_j_valid_rate": mean(
+                    vr, "learned_geom_jacobian_valid"
+                ),
+                "raw_cap_safe_rate": mean(
+                    vr, "learned_geom_cap_safe"
+                ),
+                "raw_safe_rate": mean(
+                    vr, "learned_geom_safe"
+                ),
+                "raw_mean_negative_j_fraction": mean(
+                    vr, "learned_geom_negative_fraction"
+                ),
+                "raw_mean_degenerate_fraction": mean(
+                    vr, "learned_geom_degenerate_fraction"
+                ),
+                "raw_mean_cap_fold": mean(
+                    vr, "learned_geom_cap_fold_max"
+                ),
+                "raw_worst_cap_fold": vmax(
+                    vr, "learned_geom_cap_fold_max"
+                ),
+            })
 
-            row["learned_c1_min"] = numeric_min(
-                erows, "learned_c1_min"
-            )
+        if N in projs:
+            pr = read_csv(projs[N])
+            projected = [r for r in pr if fval(r.get("projection_activated")) > 0.5]
 
-        val_path = val_files.get((N, variant))
-        if val_path:
-            vrows = read_csv(val_path)
+            raw_cd = mean(pr, "raw_chamfer_l2")
+            post_cd = mean(pr, "post_chamfer_l2")
+            raw_h = mean(pr, "raw_hausdorff")
+            post_h = mean(pr, "post_hausdorff")
 
             row.update({
-                "classical_j_valid_rate": numeric_mean(
-                    vrows, "classical_geom_jacobian_valid"
+                "projection_raw_j_valid_rate": mean(pr, "raw_j_valid"),
+                "projection_raw_cap_safe_rate": mean(pr, "raw_cap_safe"),
+                "projection_raw_safe_rate": mean(pr, "raw_safe"),
+                "post_j_valid_rate": mean(pr, "post_j_valid"),
+                "post_cap_safe_rate": mean(pr, "post_cap_safe"),
+                "post_safe_rate": mean(pr, "post_safe"),
+                "projection_activation_rate": mean(
+                    pr, "projection_activated"
                 ),
-                "j_valid_rate": numeric_mean(
-                    vrows, "learned_geom_jacobian_valid"
-                ),
-                "classical_cap_safe_rate": numeric_mean(
-                    vrows, "classical_geom_cap_safe"
-                ),
-                "cap_safe_rate": numeric_mean(
-                    vrows, "learned_geom_cap_safe"
-                ),
-                "classical_safe_rate": numeric_mean(
-                    vrows, "classical_geom_safe"
-                ),
-                "safe_rate": numeric_mean(
-                    vrows, "learned_geom_safe"
-                ),
-                "classical_negative_fraction": numeric_mean(
-                    vrows, "classical_geom_negative_fraction"
-                ),
-                "negative_fraction": numeric_mean(
-                    vrows, "learned_geom_negative_fraction"
-                ),
-                "classical_degenerate_fraction": numeric_mean(
-                    vrows, "classical_geom_degenerate_fraction"
-                ),
-                "degenerate_fraction": numeric_mean(
-                    vrows, "learned_geom_degenerate_fraction"
-                ),
-                "classical_cap_fold_mean": numeric_mean(
-                    vrows, "classical_geom_cap_fold_max"
-                ),
-                "cap_fold_mean": numeric_mean(
-                    vrows, "learned_geom_cap_fold_max"
-                ),
-                "classical_cap_fold_worst": numeric_max(
-                    vrows, "classical_geom_cap_fold_max"
-                ),
-                "cap_fold_worst": numeric_max(
-                    vrows, "learned_geom_cap_fold_max"
-                ),
-                "minimum_signed_jacobian": numeric_min(
-                    vrows, "learned_geom_minimum_signed_jacobian"
-                ),
-                "minimum_area_scale": numeric_min(
-                    vrows, "learned_geom_minimum_area_scale"
-                ),
+                "projected_object_count": len(projected),
+                "alpha_mean_projected": mean(projected, "alpha") if projected else float("nan"),
+                "alpha_median_projected": median(projected, "alpha") if projected else float("nan"),
+                "alpha_min_projected": vmin(projected, "alpha") if projected else float("nan"),
+                "raw_chamfer_l2_projection_eval": raw_cd,
+                "post_chamfer_l2": post_cd,
+                "chamfer_l2_projection_delta": post_cd - raw_cd,
+                "chamfer_l2_projection_delta_pct": pct_delta(raw_cd, post_cd),
+                "raw_hausdorff_projection_eval": raw_h,
+                "post_hausdorff": post_h,
+                "hausdorff_projection_delta": post_h - raw_h,
+                "raw_worst_cap_fold_projection_eval": vmax(pr, "raw_cap_fold"),
+                "post_worst_cap_fold": vmax(pr, "post_cap_fold"),
             })
 
-            safety_rows.append({
-                "N": N,
-                "variant": variant,
-                "classical_j_valid_rate": row["classical_j_valid_rate"],
-                "learned_j_valid_rate": row["j_valid_rate"],
-                "classical_cap_safe_rate": row["classical_cap_safe_rate"],
-                "learned_cap_safe_rate": row["cap_safe_rate"],
-                "classical_safe_rate": row["classical_safe_rate"],
-                "learned_safe_rate": row["safe_rate"],
-                "classical_mean_negative_J_pct":
-                    100.0 * row["classical_negative_fraction"],
-                "learned_mean_negative_J_pct":
-                    100.0 * row["negative_fraction"],
-                "classical_cap_fold_worst":
-                    row["classical_cap_fold_worst"],
-                "learned_cap_fold_worst":
-                    row["cap_fold_worst"],
-            })
+            for stage in ("cap_all", "tangent", "all"):
+                sr = stage_rows(pr, stage)
+                row[f"stage_{stage}_count"] = len(sr)
+                row[f"stage_{stage}_rate"] = len(sr) / len(pr) if pr else float("nan")
+                row[f"stage_{stage}_alpha_mean"] = mean(sr, "alpha") if sr else float("nan")
+                row[f"stage_{stage}_alpha_median"] = median(sr, "alpha") if sr else float("nan")
+                row[f"stage_{stage}_alpha_min"] = vmin(sr, "alpha") if sr else float("nan")
+
+        # Cross-check raw rates from validate vs projection evaluator.
+        if all(k in row for k in (
+            "raw_j_valid_rate", "projection_raw_j_valid_rate",
+            "raw_cap_safe_rate", "projection_raw_cap_safe_rate",
+            "raw_safe_rate", "projection_raw_safe_rate",
+        )):
+            diffs = [
+                abs(row["raw_j_valid_rate"] - row["projection_raw_j_valid_rate"]),
+                abs(row["raw_cap_safe_rate"] - row["projection_raw_cap_safe_rate"]),
+                abs(row["raw_safe_rate"] - row["projection_raw_safe_rate"]),
+            ]
+            row["raw_evaluators_match"] = int(max(diffs) < 1e-12)
 
         summary.append(row)
 
-    fields = [
+    # Stable, paper-friendly ordering; extras are appended automatically.
+    preferred = [
         "N",
-        "variant",
-        "classical_chamfer_l2",
-        "chamfer_l2",
-        "chamfer_l2_improvement_pct",
-        "classical_chamfer_l1",
-        "chamfer_l1",
-        "chamfer_l1_improvement_pct",
-        "classical_hausdorff",
-        "hausdorff",
-        "hausdorff_improvement_pct",
-        "classical_hausdorff95",
-        "hausdorff95",
-        "hausdorff95_improvement_pct",
-        "classical_normal_consistency",
-        "normal_consistency",
-        "normal_consistency_improvement_pct",
-        "learned_c1_min",
-        "classical_j_valid_rate",
-        "j_valid_rate",
-        "classical_cap_safe_rate",
-        "cap_safe_rate",
-        "classical_safe_rate",
-        "safe_rate",
-        "classical_negative_fraction",
-        "negative_fraction",
-        "classical_degenerate_fraction",
-        "degenerate_fraction",
-        "classical_cap_fold_mean",
-        "cap_fold_mean",
-        "classical_cap_fold_worst",
-        "cap_fold_worst",
-        "minimum_signed_jacobian",
-        "minimum_area_scale",
+        "classical_chamfer_l2", "learned_chamfer_l2",
+        "raw_j_valid_rate", "raw_cap_safe_rate", "raw_safe_rate",
+        "post_j_valid_rate", "post_cap_safe_rate", "post_safe_rate",
+        "projection_activation_rate", "projected_object_count",
+        "raw_chamfer_l2_projection_eval", "post_chamfer_l2",
+        "chamfer_l2_projection_delta", "chamfer_l2_projection_delta_pct",
+        "alpha_mean_projected", "alpha_median_projected", "alpha_min_projected",
+        "stage_cap_all_count", "stage_cap_all_alpha_mean",
+        "stage_tangent_count", "stage_tangent_alpha_mean",
+        "stage_all_count", "stage_all_alpha_mean",
+        "raw_mean_negative_j_fraction", "raw_mean_degenerate_fraction",
+        "raw_mean_cap_fold", "raw_worst_cap_fold", "post_worst_cap_fold",
+        "raw_evaluators_match",
     ]
+    all_fields = set()
+    for r in summary:
+        all_fields.update(r.keys())
+    fields = preferred + sorted(all_fields - set(preferred))
 
     os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
     with open(a.out, "w", newline="") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=fields,
-            extrasaction="ignore",
-        )
-        writer.writeheader()
-        writer.writerows(summary)
+        w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(summary)
 
     print(f"wrote {a.out}\n")
-
+    print(
+        " N | raw J | raw cap | raw SAFE | post SAFE | proj% | "
+        "raw CD | post CD | dCD% | stages(cap/tan/all)"
+    )
+    print("-" * 104)
     for r in summary:
         print(
-            f"N={r['N']:>2} {r['variant']:<14s} "
-            f"CD={r.get('chamfer_l2', float('nan')):.6f} "
-            f"({r.get('chamfer_l2_improvement_pct', float('nan')):+.1f}%) "
-            f"H95={r.get('hausdorff95', float('nan')):.6f} "
-            f"SAFE={100*r.get('safe_rate', float('nan')):.1f}% "
-            f"J={100*r.get('j_valid_rate', float('nan')):.1f}% "
-            f"cap={100*r.get('cap_safe_rate', float('nan')):.1f}% "
-            f"worst-fold={r.get('cap_fold_worst', float('nan')):.6f}"
+            f"{r['N']:2d} | "
+            f"{100*r.get('raw_j_valid_rate', float('nan')):5.1f}% | "
+            f"{100*r.get('raw_cap_safe_rate', float('nan')):7.1f}% | "
+            f"{100*r.get('raw_safe_rate', float('nan')):7.1f}% | "
+            f"{100*r.get('post_safe_rate', float('nan')):8.1f}% | "
+            f"{100*r.get('projection_activation_rate', float('nan')):5.1f}% | "
+            f"{r.get('raw_chamfer_l2_projection_eval', float('nan')):.6f} | "
+            f"{r.get('post_chamfer_l2', float('nan')):.6f} | "
+            f"{r.get('chamfer_l2_projection_delta_pct', float('nan')):+5.2f}% | "
+            f"{r.get('stage_cap_all_count', 0):d}/"
+            f"{r.get('stage_tangent_count', 0):d}/"
+            f"{r.get('stage_all_count', 0):d}"
         )
 
-    safety_out = a.safety_out
-    if safety_out:
-        os.makedirs(os.path.dirname(safety_out) or ".", exist_ok=True)
-        if safety_rows:
-            with open(safety_out, "w", newline="") as f:
-                writer = csv.DictWriter(
-                    f,
-                    fieldnames=list(safety_rows[0].keys()),
-                )
-                writer.writeheader()
-                writer.writerows(safety_rows)
-            print(f"\nwrote {safety_out}")
+        if r.get("raw_evaluators_match") == 0:
+            print(
+                f"    WARNING N={r['N']}: validate.py and "
+                "evaluate_projection.py raw safety rates disagree"
+            )
 
 
 if __name__ == "__main__":

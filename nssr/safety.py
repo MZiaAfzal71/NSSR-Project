@@ -376,23 +376,30 @@ def project_staged_to_safe(
     max_iter=40,
     with_metrics=True,
 ):
-    """Staged sampled-safety projection.
+    """Failure-aware staged sampled-safety projection.
 
-    Projection policy
-    -----------------
-    1. If raw reconstruction is already SAFE, keep it unchanged.
-    2. For any unsafe reconstruction, first try scaling only tangent controls
-       ``s_a``, ``s_b``, and ``s_tau``.
-    3. If tangent-only scaling cannot reach a safe endpoint, fall back to
-       scaling all learned correction parameters toward the classical solution.
+    Policy
+    ------
+    1. SAFE raw reconstruction:
+         keep unchanged.
 
-    This preserves the current global projection as a guaranteed fallback
-    whenever the classical endpoint is sampled-safe.
+    2. Cap-only failure (J-valid, cap-unsafe):
+         scale ALL corrections directly.
+         Empirically this preserves the learned solution much better than
+         tangent-only scaling for cap turn-back violations.
+
+    3. Any Jacobian failure (with or without cap failure):
+         first try tangent-only scaling of ``s_a``, ``s_b``, ``s_tau``;
+         if that stage has no safe alpha=0 endpoint, fall back to scaling all
+         learned corrections toward the classical solution.
+
+    The global stage remains the final guaranteed fallback whenever the
+    classical endpoint is sampled-safe.
 
     Returns:
         projected_params,
         alpha,
-        stage,               # "none", "tangent", or "all"
+        stage,               # "none", "cap_all", "tangent", or "all"
         raw_safety,
         raw_metrics,
         post_safety,
@@ -421,6 +428,38 @@ def project_staged_to_safe(
             raw_metrics,
         )
 
+    all_keys = tuple(params.keys())
+
+    # Cap-only failures are best repaired by gentle global scaling.
+    if raw_safety["jacobian_valid"] and not raw_safety["cap_safe"]:
+        all_result = _binary_search_projection(
+            obj,
+            params,
+            all_keys,
+            n_u,
+            reference_normal,
+            max_cap_fold,
+            max_iter,
+            with_metrics,
+        )
+        if all_result is None:
+            raise RuntimeError(
+                "Classical endpoint is not sampled-safe under the shared "
+                "Jacobian/cap safety definition."
+            )
+
+        p, alpha, safety_out, metrics_out = all_result
+        return (
+            p,
+            alpha,
+            "cap_all",
+            raw_safety,
+            raw_metrics,
+            safety_out,
+            metrics_out,
+        )
+
+    # Jacobian failures: preserve non-tangent corrections when possible.
     tangent_keys = ("s_a", "s_b", "s_tau")
     tangent = _binary_search_projection(
         obj,
@@ -444,8 +483,7 @@ def project_staged_to_safe(
             metrics_out,
         )
 
-    # Final guaranteed fallback: scale all learned corrections.
-    all_keys = tuple(params.keys())
+    # Final fallback for hard Jacobian (or combined) failures.
     all_result = _binary_search_projection(
         obj,
         params,

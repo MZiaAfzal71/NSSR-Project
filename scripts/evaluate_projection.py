@@ -62,7 +62,8 @@ def main():
     ap.add_argument("--projection_iters", type=int, default=40)
     ap.add_argument(
         "--projection_mode", choices=("staged", "global"), default="staged",
-        help="staged tries tangent-only first; global scales all corrections",
+        help=("staged uses failure-aware repair: cap-only -> global, "
+              "J-fail -> tangent then global fallback; global always scales all"),
     )
     ap.add_argument("--fp64", action="store_true")
     a = ap.parse_args()
@@ -267,7 +268,7 @@ def main():
     else:
         print("alpha on projected objects: no projection required")
 
-    for stage_name in ("tangent", "all"):
+    for stage_name in ("cap_all", "tangent", "all"):
         stage_rows = [
             r for r in rows if r["projection_stage"] == stage_name
         ]
