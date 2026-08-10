@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt
 from nssr.preprocess import preprocess_designer
 from nssr.geometry import hermite_surface, zero_params, surface_points
 from nssr.networks import ParamNet, contour_features
-from nssr.losses import chamfer, _nn_sqdist
+from nssr.losses import _nn_sqdist, cap_radial_fold_loss, cap_radial_fold_max
 from nssr.metrics import axis_clearance
 
 
@@ -49,44 +49,92 @@ def freeze_cap_params(params):
 
 
 
-def project_to_safe(obj, params, n_u, surf_fn, min_ratio=0.15, iters=18):
-    """Scale the predicted tangent parameters by the largest alpha in (0,1]
-    that keeps the surface clear of the object's axis.
+def _scaled_params(params, alpha, keys=None):
+    if keys is None:
+        keys = tuple(params.keys())
+    return {
+        k: (v * alpha if k in keys else v)
+        for k, v in params.items()
+    }
 
-    Why this is needed: bounding the multiplier by c_bound does NOT
-    guarantee axis clearance. Measured on the vase, with PER-ROW parameter
-    variation (which is what the network actually produces, unlike a
-    uniform sweep): c_bound=1.0 can still drive clearance to 0.002, and
-    c_bound=0.7 still fails on the apple. Only c_bound<=0.5 was safe under
-    per-row variation for both shapes -- but that bound costs accuracy
-    everywhere, to prevent a failure that occurs on a few narrow features.
 
-    This is a PROJECTION onto the feasible set instead: it leaves safe
-    predictions untouched (alpha=1) and scales back only when the geometry
-    demands it. On a measured failure case it restored clearance from
-    0.002 to 0.15 while retaining 91% of the learned correction.
+def cap_fold_ratio(obj, S):
+    """Maximum dimensionless radial turn-back in base/crown caps."""
+    return float(
+        cap_radial_fold_max(
+            S,
+            obj["RB"],
+            obj["RC"],
+            closed_top=obj["closed_top"],
+        ).detach()
+    )
 
-    Cap parameters (s_fB/s_fC/s_bh/s_th) are not scaled: they do not drive
-    axis crossings, and shrinking them would undo the learned cap shape.
+
+def _safe_state(obj, params, n_u, surf_fn, min_ratio, max_cap_fold):
+    S = surf_fn(obj, params, n_u)
+    ratio = axis_clearance(S, obj["R"])[1]
+    fold = cap_fold_ratio(obj, S)
+    return S, ratio, fold, (ratio >= min_ratio and fold <= max_cap_fold)
+
+
+def project_to_safe(
+    obj,
+    params,
+    n_u,
+    surf_fn,
+    min_ratio=0.15,
+    max_cap_fold=1e-3,
+    iters=18,
+):
+    """Project learned corrections toward classical until geometry is safe.
+
+    Safety now requires BOTH:
+      1. sufficient axis clearance;
+      2. no meaningful cap radial turn-back.
+
+    Stage 1 scales only tangent modulation (preserving learned cap controls).
+    If that cannot remove the cap loop, Stage 2 scales all learned corrections.
+    Since alpha=0 is the classical solution, the second stage has a known safe
+    endpoint whenever the classical reconstruction is safe.
     """
+    S0, r0, f0, ok0 = _safe_state(
+        obj, params, n_u, surf_fn, min_ratio, max_cap_fold
+    )
+    if ok0:
+        return params, 1.0, r0, r0, f0, f0, "none"
+
     tangent_keys = ("s_a", "s_b", "s_tau")
-    scale = lambda a: {k: (v * a if k in tangent_keys else v)
-                       for k, v in params.items()}
-    ratio0 = axis_clearance(surf_fn(obj, params, n_u), obj["R"])[1]
-    if ratio0 >= min_ratio:
-        return params, 1.0, ratio0, ratio0
+
+    # First try preserving cap-specific controls.
+    p_zero_tan = _scaled_params(params, 0.0, tangent_keys)
+    _, _, _, tangent_zero_safe = _safe_state(
+        obj, p_zero_tan, n_u, surf_fn, min_ratio, max_cap_fold
+    )
+
+    if tangent_zero_safe:
+        keys = tangent_keys
+        stage = "tangent"
+    else:
+        keys = tuple(params.keys())
+        stage = "all"
+
     lo, hi = 0.0, 1.0
     for _ in range(iters):
-        mid = (lo + hi) / 2
-        if axis_clearance(surf_fn(obj, scale(mid), n_u),
-                          obj["R"])[1] >= min_ratio:
+        mid = (lo + hi) / 2.0
+        pm = _scaled_params(params, mid, keys)
+        _, _, _, ok = _safe_state(
+            obj, pm, n_u, surf_fn, min_ratio, max_cap_fold
+        )
+        if ok:
             lo = mid
         else:
             hi = mid
-    out = scale(lo)
-    return out, lo, ratio0, axis_clearance(surf_fn(obj, out, n_u),
-                                           obj["R"])[1]
 
+    out = _scaled_params(params, lo, keys)
+    _, r1, f1, _ = _safe_state(
+        obj, out, n_u, surf_fn, min_ratio, max_cap_fold
+    )
+    return out, lo, r0, r1, f0, f1, stage
 
 def load_designer(ds, n1, device, dtype):
     pre = preprocess_designer(ds, n1=n1)
@@ -252,6 +300,28 @@ def tto_leave_one_out(obj, n_u, iters=300, lr=1e-3, reg=0.0, lam_prox=1e-2,
         # happen to go -- the cause of the exploding cap cones. Supervised
         # regions still move freely, since the data term dominates there.
         loss = loss + lam_prox * prox
+
+        # The leave-one-out data term does not directly supervise the cap.
+        # Evaluate the geometry-conditioned network on the FULL object and
+        # explicitly prevent radial cap turn-back during TTO.
+        if lam_cap_fold != 0.0:
+            f_full_now = contour_features(
+                obj["R"], obj["Z"], obj["RB"], obj["RC"], obj["Bh"], obj["Th"]
+            )
+            p_full_now = net(f_full_now)
+            p_full_now = {
+                **p_full_now,
+                "s_fB": ref_full["s_fB"],
+                "s_fC": ref_full["s_fC"],
+            }
+            S_full_now = surf(obj, p_full_now, n_u)
+            loss = loss + lam_cap_fold * cap_radial_fold_loss(
+                S_full_now,
+                obj["RB"],
+                obj["RC"],
+                closed_top=obj["closed_top"],
+            )
+
         loss.backward()
         torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
         opt.step()
@@ -321,6 +391,11 @@ def main():
     ap.add_argument("--tto_prox", type=float, default=1e-2,
                     help="anchor toward the classical solution; raise if "
                          "unsupervised regions (caps) distort")
+    ap.add_argument("--tto_cap_fold", type=float, default=1e-2,
+                    help="cap radial-fold penalty used during TTO")
+    ap.add_argument("--max_cap_fold", type=float, default=1e-3,
+                    help="maximum normalized cap radial turn-back allowed by "
+                         "the inference safety projection")
     ap.add_argument("--out", default="results/designer")
     ap.add_argument("--c_bound", type=float, default=1.0,
                     help="must match the value the checkpoint was trained with")
@@ -366,6 +441,7 @@ def main():
             init_sd = {k: v.to(dtype=dt) for k, v in sd.items()}
         params = tto_leave_one_out(obj, a.n_u, iters=a.tto_iters,
                                    lr=a.tto_lr, lam_prox=a.tto_prox,
+                                   lam_cap_fold=a.tto_cap_fold,
                                    init_net=init_sd, device=dev, dtype=dt)
 
     if a.freeze_caps:
@@ -389,16 +465,21 @@ def main():
         label += ", caps frozen"
     label += ")"
     if not a.no_safe_render and a.mode != "classical":
-        params, alpha, r0, r1 = project_to_safe(
-            obj, params, a.n_u, surf, min_ratio=a.min_clearance)
+        params, alpha, r0, r1, f0, f1, stage = project_to_safe(
+            obj, params, a.n_u, surf,
+            min_ratio=a.min_clearance,
+            max_cap_fold=a.max_cap_fold)
         if alpha < 1.0:
-            print(f"axis-clearance projection: ratio {r0:.3f} -> {r1:.3f} "
-                  f"(alpha={alpha:.3f}, retained {alpha*100:.0f}% of the "
-                  f"learned correction)")
+            print(
+                f"safety projection ({stage}): axis {r0:.3f} -> {r1:.3f}, "
+                f"cap-fold {f0:.5f} -> {f1:.5f} "
+                f"(alpha={alpha:.3f}, retained {alpha*100:.0f}% correction)"
+            )
             S = surf(obj, params, a.n_u)
     clr, ratio = axis_clearance(S, obj["R"])
     print(f"axis clearance: {clr:.4f} ({ratio*100:.1f}% of the narrowest "
           f"input contour)")
+    print(f"cap radial fold max: {cap_fold_ratio(obj, S):.6f}")
     if ratio < 0.10:
         print("  WARNING: the surface is collapsing onto the object axis. "
               "This produces a pinch-to-a-point and a flared 'cone' in the "

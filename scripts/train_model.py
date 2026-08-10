@@ -79,7 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--epochs",
         type=int,
-        default=200,
+        default=100,
     )
     parser.add_argument(
         "--lr",
@@ -169,34 +169,21 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--lam_curvature",
-        type=float,
-        default=0.0,
-        help=(
-            "Excessive-curvature barrier weight. Default 0 preserves the "
-            "legacy training path."
-        ),
-    )
-    parser.add_argument(
         "--jacobian_margin",
         type=float,
         default=1e-4,
         help="Desired positive signed-Jacobian margin.",
     )
     parser.add_argument(
-        "--max_abs_curvature",
+        "--lam_cap_fold",
         type=float,
-        default=100.0,
-        help=(
-            "Principal-curvature magnitude allowed before the curvature "
-            "barrier activates."
-        ),
+        default=0.0,
+        help="Weight for cap radial turn-back / loop prevention.",
     )
     parser.add_argument(
-        "--curvature_power",
+        "--cap_fold_power",
         type=float,
         default=2.0,
-        help="Exponent applied to curvature-threshold violations.",
     )
 
     # ------------------------------------------------------------------
@@ -297,12 +284,10 @@ def main():
         parser.error("--accum must be >= 1")
     if args.lam_jacobian < 0:
         parser.error("--lam_jacobian must be >= 0")
-    if args.lam_curvature < 0:
-        parser.error("--lam_curvature must be >= 0")
-    if args.max_abs_curvature <= 0:
-        parser.error("--max_abs_curvature must be > 0")
-    if args.curvature_power <= 0:
-        parser.error("--curvature_power must be > 0")
+    if args.lam_cap_fold < 0:
+        parser.error("--lam_cap_fold must be >= 0")
+    if args.cap_fold_power <= 0:
+        parser.error("--cap_fold_power must be > 0")
     if args.cap_weight <= 0:
         parser.error("--cap_weight must be > 0")
 
@@ -325,7 +310,7 @@ def main():
 
     geometry_enabled = (
         args.lam_jacobian != 0.0
-        or args.lam_curvature != 0.0
+        or args.lam_cap_fold != 0.0
     )
 
     print("NSSR-V2 training configuration")
@@ -338,9 +323,8 @@ def main():
 
     if geometry_enabled:
         print(f"  lambda Jacobian     : {args.lam_jacobian:g}")
-        print(f"  lambda curvature    : {args.lam_curvature:g}")
+        print(f"  lambda cap fold    : {args.lam_cap_fold:g}")
         print(f"  Jacobian margin     : {args.jacobian_margin:g}")
-        print(f"  max |curvature|     : {args.max_abs_curvature:g}")
 
     train(
         train_samples,
@@ -355,10 +339,9 @@ def main():
         lam_r=args.lam_r,
         lam_s=args.lam_s,
         lam_jacobian=args.lam_jacobian,
-        lam_curvature=args.lam_curvature,
         jacobian_margin=args.jacobian_margin,
-        max_abs_curvature=args.max_abs_curvature,
-        curvature_power=args.curvature_power,
+        lam_cap_fold=args.lam_cap_fold,
+        cap_fold_power=args.cap_fold_power,
         accum=args.accum,
         seed=args.seed,
         surf_sub=args.surf_sub,
