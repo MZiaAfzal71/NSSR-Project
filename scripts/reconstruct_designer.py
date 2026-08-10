@@ -331,7 +331,7 @@ def render(S, path, title, hide_crown=False):
 
 
 def tto_leave_one_out(obj, n_u, iters=300, lr=1e-3, reg=0.0, lam_prox=1e-2,
-                      lam_cap_fold=1e-2, init_net=None,
+                      lam_cap_fold=1e-2, init_net=None, c_bound=1.0,
                       device="cpu", dtype=torch.float64):
     """Test-time optimization, leave-one-slice-out, with NO ground truth:
     hold out each interior contour in turn, reconstruct from the rest, and
@@ -366,7 +366,7 @@ def tto_leave_one_out(obj, n_u, iters=300, lr=1e-3, reg=0.0, lam_prox=1e-2,
     methods like OReX.
     """
     N, m = obj["R"].shape[0], obj["R"].shape[1]
-    net = ParamNet().to(device=device, dtype=dtype)
+    net = ParamNet(c_bound=c_bound).to(device=device, dtype=dtype)
     if init_net is not None:
         net.load_state_dict(init_net)
     net.train()
@@ -500,7 +500,7 @@ def tto_leave_one_out(obj, n_u, iters=300, lr=1e-3, reg=0.0, lam_prox=1e-2,
     # We report BOTH the absolute magnitude and the drift from the
     # reference, since with --tto_init net a large |s| may simply be what
     # the trained model already predicted, not something tto introduced.
-    print("  tto per-row |s| (bound 2.0)  and  |s - reference| drift:")
+    print(f"  tto per-row |s| (bound {c_bound:g})  and  |s - reference| drift:")
     for k in ("s_a", "s_b", "s_tau"):
         mag = params[k].abs().max(dim=1).values.cpu().numpy()
         drift = (params[k] - ref_full[k]).abs().max(dim=1).values.cpu().numpy()
@@ -568,6 +568,7 @@ def main():
                          "default to match the paper's Figure 1c; the "
                          "underlying surface always includes it)")
     a = ap.parse_args()
+    print(f"ParamNet c_bound: {a.c_bound:g}")
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     dt = torch.float64
     os.makedirs(a.out, exist_ok=True)
@@ -600,7 +601,7 @@ def main():
         params = tto_leave_one_out(obj, a.n_u, iters=a.tto_iters,
                                    lr=a.tto_lr, lam_prox=a.tto_prox,
                                    lam_cap_fold=a.tto_cap_fold,
-                                   init_net=init_sd, device=dev, dtype=dt)
+                                   init_net=init_sd, device=dev, dtype=dt, c_bound=a.c_bound)
 
     if a.freeze_caps:
         params = freeze_cap_params(params)
