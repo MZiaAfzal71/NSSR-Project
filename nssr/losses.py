@@ -134,6 +134,35 @@ def intentional_pole_mask(
     return mask
 
 
+def _cap_progress_violation(
+    cap: torch.Tensor,
+    *,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """Backward motion along the cap endpoint chord.
+
+    ``cap`` has shape ``(n_u, m, 3)`` and is parameterized from endpoint 0 to
+    endpoint 1.  For each circumferential column we project every sampled point
+    onto the straight chord joining its two cap endpoints:
+
+        t(u) = <S(u)-P0, P1-P0> / ||P1-P0||^2.
+
+    A non-self-turning cap must not move *backwards* along that chord as u
+    increases.  Lateral Hermite bulge is still allowed; only negative progress
+    increments are penalized.
+
+    This catches the axial/meridional turn-back visible in the apple cap even
+    when radial distance alone remains monotone.
+    """
+    p0 = cap[0:1]
+    p1 = cap[-1:]
+    chord = p1 - p0                                      # (1,m,3)
+    denom = chord.square().sum(dim=-1).clamp_min(eps)   # (1,m)
+    t = ((cap - p0) * chord).sum(dim=-1) / denom        # (n_u,m)
+    dt = t[1:] - t[:-1]
+    return torch.relu(-dt)
+
+
 def cap_radial_fold_measure(
     surface: torch.Tensor,
     RB: torch.Tensor,
@@ -142,44 +171,57 @@ def cap_radial_fold_measure(
     closed_top: bool = True,
     eps: float = 1e-8,
 ):
-    """Measure normalized radial turn-back in the cap patches.
+    """Combined cap turn-back measure.
 
-    A valid base cap should move radially OUT from RB as u increases:
-        r(u+du) - r(u) >= 0.
+    Historical name retained for API compatibility.  The measure now catches
+    TWO independent loop mechanisms:
 
-    A valid crown cap should move radially IN toward RC as u increases:
-        r(u+du) - r(u) <= 0.
+    1. radial reversal about the cap pole in the xy plane;
+    2. backward meridional/chord progress in full 3-D.
 
-    Returns
-    -------
-    base_violation, crown_violation
-        Non-negative tensors shaped roughly ``(n_u-1, m)`` and normalized by
-        the corresponding input-cap radius.  Zero means monotone radial travel.
+    The returned violation is the pointwise maximum of those two normalized,
+    dimensionless tests.  Therefore existing validation/reconstruction code
+    using ``cap_radial_fold_*`` automatically receives the stronger test.
 
-    Notes
-    -----
-    This is deliberately a *turn-back* measure, not a generic smoothness or
-    curvature measure.  It therefore targets the visible cap loop directly.
+    Base cap
+    --------
+    Pole -> first contour:
+        radial distance should not decrease;
+        chord progress should not decrease.
+
+    Crown cap
+    ---------
+    Last contour -> pole:
+        radial distance should not increase;
+        chord progress should not decrease.
     """
     if surface.ndim != 4 or surface.shape[-1] != 3:
         raise ValueError("surface must have shape (P, n_u, m, 3)")
 
-    # Base: pole -> first contour.
-    base_xy = surface[0, :, :, :2]
-    base_r = torch.linalg.vector_norm(base_xy - RB.reshape(1, 1, 2), dim=-1)
+    # ----- base ------------------------------------------------------------
+    base = surface[0]
+    base_xy = base[:, :, :2]
+    base_r = torch.linalg.vector_norm(
+        base_xy - RB.reshape(1, 1, 2), dim=-1
+    )
     base_scale = base_r[-1].mean().clamp_min(eps)
     base_dr = (base_r[1:] - base_r[:-1]) / base_scale
-    base_violation = torch.relu(-base_dr)
+    base_radial = torch.relu(-base_dr)
+    base_progress = _cap_progress_violation(base, eps=eps)
+    base_violation = torch.maximum(base_radial, base_progress)
 
+    # ----- crown -----------------------------------------------------------
     if closed_top:
-        # Crown: last contour -> pole.
-        crown_xy = surface[-1, :, :, :2]
+        crown = surface[-1]
+        crown_xy = crown[:, :, :2]
         crown_r = torch.linalg.vector_norm(
             crown_xy - RC.reshape(1, 1, 2), dim=-1
         )
         crown_scale = crown_r[0].mean().clamp_min(eps)
         crown_dr = (crown_r[1:] - crown_r[:-1]) / crown_scale
-        crown_violation = torch.relu(crown_dr)
+        crown_radial = torch.relu(crown_dr)
+        crown_progress = _cap_progress_violation(crown, eps=eps)
+        crown_violation = torch.maximum(crown_radial, crown_progress)
     else:
         crown_violation = torch.zeros(
             0,
@@ -200,14 +242,11 @@ def cap_radial_fold_loss(
     power: float = 2.0,
     reduction: str = "mean",
 ) -> torch.Tensor:
-    """Differentiable loss for cap radial turn-back / loops.
+    """Differentiable combined cap loop / turn-back loss.
 
-    The measure is dimensionless because each cap is normalized by its boundary
-    radius.  Classical monotone caps therefore have loss approximately zero,
-    while a radial reversal produces a positive penalty.
-
-    ``power=2`` is recommended.  The default does NOT force a minimum radial
-    slope; it only penalizes reversal, so flat-but-valid regions are allowed.
+    The public function name is retained so existing scripts do not need to be
+    changed.  It now penalizes both radial reversal and backward 3-D cap
+    progress.  Classical caps should remain approximately zero.
     """
     if power <= 0:
         raise ValueError("power must be > 0")
@@ -244,9 +283,12 @@ def cap_radial_fold_max(
     *,
     closed_top: bool = True,
 ) -> torch.Tensor:
-    """Maximum normalized radial reversal, useful for inference diagnostics."""
+    """Maximum combined normalized cap turn-back diagnostic."""
     b, c = cap_radial_fold_measure(
-        surface, RB, RC, closed_top=closed_top
+        surface,
+        RB,
+        RC,
+        closed_top=closed_top,
     )
     vals = [b.reshape(-1)]
     if c.numel():

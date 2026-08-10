@@ -59,7 +59,7 @@ def _scaled_params(params, alpha, keys=None):
 
 
 def cap_fold_ratio(obj, S):
-    """Maximum dimensionless radial turn-back in base/crown caps."""
+    """Maximum dimensionless radial/meridional turn-back in the caps."""
     return float(
         cap_radial_fold_max(
             S,
@@ -174,7 +174,8 @@ def render(S, path, title, hide_crown=False):
 
 
 def tto_leave_one_out(obj, n_u, iters=300, lr=1e-3, reg=0.0, lam_prox=1e-2,
-                      init_net=None, device="cpu", dtype=torch.float64):
+                      lam_cap_fold=1e-2, init_net=None,
+                      device="cpu", dtype=torch.float64):
     """Test-time optimization, leave-one-slice-out, with NO ground truth:
     hold out each interior contour in turn, reconstruct from the rest, and
     require the surface to pass through the held-out ring.
@@ -472,14 +473,14 @@ def main():
         if alpha < 1.0:
             print(
                 f"safety projection ({stage}): axis {r0:.3f} -> {r1:.3f}, "
-                f"cap-fold {f0:.5f} -> {f1:.5f} "
+                f"cap-turnback {f0:.5f} -> {f1:.5f} "
                 f"(alpha={alpha:.3f}, retained {alpha*100:.0f}% correction)"
             )
             S = surf(obj, params, a.n_u)
     clr, ratio = axis_clearance(S, obj["R"])
     print(f"axis clearance: {clr:.4f} ({ratio*100:.1f}% of the narrowest "
           f"input contour)")
-    print(f"cap radial fold max: {cap_fold_ratio(obj, S):.6f}")
+    print(f"cap turn-back max: {cap_fold_ratio(obj, S):.6f}")
     if ratio < 0.10:
         print("  WARNING: the surface is collapsing onto the object axis. "
               "This produces a pinch-to-a-point and a flared 'cone' in the "
