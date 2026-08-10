@@ -3,9 +3,10 @@
 Curvature is intentionally excluded from the active training path.  The two
 geometry losses target distinct failure modes:
 
-- ``lam_jacobian``: local orientation reversal / degeneracy.
-- ``lam_cap_fold``: radial cap turn-back that can create a visible loop even
-  when the local Jacobian remains positive.
+- ``lam_jacobian``: local orientation reversal / degeneracy, using a
+  hard-sample top-k barrier.
+- ``lam_cap_fold``: radial/meridional cap turn-back, also using a top-k
+  thresholded barrier aligned with validation.
 
 Both default to zero for migration compatibility.
 """
@@ -195,8 +196,11 @@ def train(
     lam_s=1e-3,
     lam_jacobian=0.0,
     jacobian_margin=1e-4,
+    jacobian_power=2.0,
     lam_cap_fold=0.0,
+    cap_fold_margin=1e-3,
     cap_fold_power=2.0,
+    geometry_topk_fraction=0.05,
     accum=8,
     seed=0,
     surf_sub=20000,
@@ -212,6 +216,16 @@ def train(
 ):
     """Train NSSR with optional local- and cap-safety regularization."""
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+
+    if not (0.0 < geometry_topk_fraction <= 1.0):
+        raise ValueError("geometry_topk_fraction must lie in (0, 1]")
+    if jacobian_power <= 0.0:
+        raise ValueError("jacobian_power must be > 0")
+    if cap_fold_power <= 0.0:
+        raise ValueError("cap_fold_power must be > 0")
+    if cap_fold_margin < 0.0:
+        raise ValueError("cap_fold_margin must be >= 0")
+
     os.makedirs(out_dir, exist_ok=True)
 
     torch.manual_seed(seed)
@@ -332,8 +346,11 @@ def train(
                 geometry=geometry,
                 lam_jacobian=lam_jacobian,
                 jacobian_margin=jacobian_margin,
+                jacobian_power=jacobian_power,
                 lam_cap_fold=lam_cap_fold,
+                cap_fold_margin=cap_fold_margin,
                 cap_fold_power=cap_fold_power,
+                geometry_topk_fraction=geometry_topk_fraction,
             )
 
             if epoch > 0:
