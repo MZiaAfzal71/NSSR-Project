@@ -15,7 +15,7 @@ Only display/export surfaces repeat the first circumferential point to close
 the visual seam; computational geometry remains unchanged.
 """
 from __future__ import annotations
-import argparse, csv, glob, os
+import argparse, csv, glob, math, os
 from pathlib import Path
 
 
@@ -27,12 +27,25 @@ def read_rows(path):
 
 
 def short(v, digits=4):
+    """Paper-friendly scalar formatting.
+
+    Empty/NaN values are displayed as '--'.  This is especially important
+    for stage-wise alpha means: when a projection stage occurs zero times,
+    its mean alpha is undefined rather than zero.
+    """
+    if v is None:
+        return "--"
+    s = str(v).strip()
+    if not s or s.lower() in {"nan", "none"}:
+        return "--"
+    if s == "--":
+        return "--"
     try:
-        x = float(v)
+        x = float(s)
     except Exception:
-        return str(v)
-    if abs(x) <= 1 and ("rate" in str(v).lower()):
-        return f"{100*x:.1f}%"
+        return s
+    if not math.isfinite(x):
+        return "--"
     return f"{x:.{digits}g}"
 
 
@@ -145,13 +158,22 @@ def main():
         for r in dom:
             vals = []
             for c in cols:
-                x = r.get(c,"")
-                if "rate" in c:
-                    try: x = f"{100*float(x):.1f}%"
-                    except Exception: pass
+                raw = r.get(c, "")
+                s = str(raw).strip()
+                if not s or s.lower() in {"nan", "none"}:
+                    x = "--"
+                elif "rate" in c:
+                    try:
+                        x = f"{100*float(s):.1f}%"
+                    except Exception:
+                        x = s
                 elif "chamfer" in c:
-                    try: x = f"{float(x):.6f}"
-                    except Exception: pass
+                    try:
+                        x = f"{float(s):.6f}"
+                    except Exception:
+                        x = s
+                else:
+                    x = s
                 vals.append(x)
             data.append(vals)
         t = Table(data, repeatRows=1)
@@ -162,6 +184,47 @@ def main():
             ("ALIGN",(0,0),(-1,-1),"CENTER"),
         ]))
         story += [t, Spacer(1,5*mm)]
+
+        # Projection-stage details. Undefined mean alpha is shown as "--"
+        # when the corresponding stage count is zero.
+        if any("cap_all_count" in r for r in dom):
+            story += [
+                Paragraph(
+                    "Projection-stage breakdown",
+                    styles["Heading2"],
+                )
+            ]
+            sh = [
+                "Train", "Test", "N",
+                "cap-all n", "cap-all alpha",
+                "tangent n", "tangent alpha",
+                "all n", "all alpha",
+            ]
+            sd = [sh]
+            for r in dom:
+                def stage_cell(stage):
+                    n = int(float(r.get(f"{stage}_count", 0) or 0))
+                    if n == 0:
+                        return str(n), "--"
+                    return str(n), short(r.get(f"{stage}_alpha_mean", "--"), 3)
+
+                cn, ca = stage_cell("cap_all")
+                tn, ta = stage_cell("tangent")
+                an, aa = stage_cell("all")
+                sd.append([
+                    r.get("train_domain", ""),
+                    r.get("test_domain", ""),
+                    r.get("N", ""),
+                    cn, ca, tn, ta, an, aa,
+                ])
+            st = Table(sd, repeatRows=1)
+            st.setStyle(TableStyle([
+                ("BACKGROUND",(0,0),(-1,0),colors.lightgrey),
+                ("GRID",(0,0),(-1,-1),0.35,colors.grey),
+                ("FONTSIZE",(0,0),(-1,-1),7.5),
+                ("ALIGN",(0,0),(-1,-1),"CENTER"),
+            ]))
+            story += [st, Spacer(1,5*mm)]
 
     groups = [
         ("C. Real-object reconstructions", a.real_figs),

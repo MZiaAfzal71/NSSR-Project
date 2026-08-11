@@ -54,14 +54,37 @@ def read_csv(path):
         return list(csv.DictReader(f))
 
 
+def parse_value(x):
+    """Parse numeric and boolean CSV fields consistently."""
+    if x is None:
+        return float("nan")
+    if isinstance(x, bool):
+        return 1.0 if x else 0.0
+    s = str(x).strip()
+    if not s:
+        return float("nan")
+    if s.lower() == "true":
+        return 1.0
+    if s.lower() == "false":
+        return 0.0
+    try:
+        return float(s)
+    except Exception:
+        return float("nan")
+
+
 def mean(rows, key):
     vals = []
     for r in rows:
-        try:
-            vals.append(float(r[key]))
-        except Exception:
-            pass
+        x = parse_value(r.get(key))
+        if np.isfinite(x):
+            vals.append(x)
     return float(np.mean(vals)) if vals else float("nan")
+
+
+def stage_mean(rows, stage):
+    selected = [r for r in rows if r.get("projection_stage") == stage]
+    return mean(selected, "alpha") if selected else "--"
 
 
 def eval_ckpt(py, data, N, ckpt, result_prefix, a):
@@ -85,43 +108,120 @@ def eval_ckpt(py, data, N, ckpt, result_prefix, a):
 
 
 def collect_domain(rowspecs, out):
+    """Write the canonical paper-ready cross-domain table.
+
+    Boolean fields from validate.py (True/False) and projection evaluation
+    (0/1) are parsed identically. Stage-wise alpha is "--" if that stage was
+    never activated, because the mean of an empty stage is undefined.
+    """
     rows_out = []
     for domain, train_domain, N, val_path, proj_path in rowspecs:
         if not os.path.exists(val_path) or not os.path.exists(proj_path):
             continue
+
         vr, pr = read_csv(val_path), read_csv(proj_path)
+        if not vr or not pr:
+            continue
+
+        classical_cd = mean(vr, "classical_chamfer_l2")
+        learned_cd = mean(vr, "learned_chamfer_l2")
+        post_cd = mean(pr, "post_chamfer_l2")
+
+        raw_j = mean(vr, "learned_geom_jacobian_valid")
+        raw_cap = mean(vr, "learned_geom_cap_safe")
+        raw_safe = mean(vr, "learned_geom_safe")
+
+        proj_raw_j = mean(pr, "raw_j_valid")
+        proj_raw_cap = mean(pr, "raw_cap_safe")
+        proj_raw_safe = mean(pr, "raw_safe")
+
+        pairs = [
+            (raw_j, proj_raw_j),
+            (raw_cap, proj_raw_cap),
+            (raw_safe, proj_raw_safe),
+        ]
+        evaluators_match = all(
+            np.isfinite(a) and np.isfinite(b) and abs(a - b) < 1e-12
+            for a, b in pairs
+        )
+
+        def improvement(ref, value):
+            if not (np.isfinite(ref) and np.isfinite(value)) or abs(ref) < 1e-12:
+                return float("nan")
+            return 100.0 * (ref - value) / abs(ref)
+
         row = {
             "train_domain": train_domain,
             "test_domain": domain,
             "N": N,
-            "classical_chamfer_l2": mean(vr, "classical_chamfer_l2"),
-            "learned_chamfer_l2": mean(vr, "learned_chamfer_l2"),
-            "raw_j_valid_rate": mean(vr, "learned_geom_jacobian_valid"),
-            "raw_cap_safe_rate": mean(vr, "learned_geom_cap_safe"),
-            "raw_safe_rate": mean(vr, "learned_geom_safe"),
+            "n_objects": len(vr),
+
+            "classical_chamfer_l2": classical_cd,
+            "learned_chamfer_l2": learned_cd,
+            "raw_improvement_pct": improvement(classical_cd, learned_cd),
+
+            "raw_j_valid_rate": raw_j,
+            "raw_cap_safe_rate": raw_cap,
+            "raw_safe_rate": raw_safe,
+
             "post_j_valid_rate": mean(pr, "post_j_valid"),
             "post_cap_safe_rate": mean(pr, "post_cap_safe"),
             "post_safe_rate": mean(pr, "post_safe"),
+
             "projection_activation_rate": mean(pr, "projection_activated"),
-            "post_chamfer_l2": mean(pr, "post_chamfer_l2"),
+
             "raw_chamfer_l2_projection_eval": mean(pr, "raw_chamfer_l2"),
+            "post_chamfer_l2": post_cd,
             "mean_projection_delta": mean(pr, "delta_chamfer_l2"),
+            "post_improvement_pct": improvement(classical_cd, post_cd),
+
+            "cap_all_count": sum(
+                r.get("projection_stage") == "cap_all" for r in pr
+            ),
+            "cap_all_alpha_mean": stage_mean(pr, "cap_all"),
+
+            "tangent_count": sum(
+                r.get("projection_stage") == "tangent" for r in pr
+            ),
+            "tangent_alpha_mean": stage_mean(pr, "tangent"),
+
+            "all_count": sum(
+                r.get("projection_stage") == "all" for r in pr
+            ),
+            "all_alpha_mean": stage_mean(pr, "all"),
+
+            "raw_evaluators_match": int(evaluators_match),
         }
-        for stage in ("cap_all", "tangent", "all"):
-            sr = [r for r in pr if r.get("projection_stage") == stage]
-            row[f"{stage}_count"] = len(sr)
-            row[f"{stage}_alpha_mean"] = mean(sr, "alpha") if sr else float("nan")
         rows_out.append(row)
 
+        status = "OK" if evaluators_match else "MISMATCH"
+        print(
+            f"N={N:2d} {train_domain:9s}->{domain:9s} "
+            f"raw SAFE={100*raw_safe:5.1f}% "
+            f"post SAFE={100*row['post_safe_rate']:5.1f}% "
+            f"proj={100*row['projection_activation_rate']:5.1f}% "
+            f"[{status}]"
+        )
+
     if not rows_out:
-        return
+        raise RuntimeError("no complete domain evaluation pairs found")
+
+    bad = [r for r in rows_out if not r["raw_evaluators_match"]]
+    if bad:
+        raise RuntimeError(
+            "validate.py and evaluate_projection.py disagree on raw safety "
+            "for at least one domain/N; refusing to write paper table"
+        )
+
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     fields = list(rows_out[0].keys())
     with open(out, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
         w.writerows(rows_out)
+
     print("wrote", out)
+    return rows_out
 
 
 def main():
@@ -155,6 +255,35 @@ def main():
     ap.add_argument("--skip_mixed", action="store_true")
     ap.add_argument("--figures", action="store_true")
     ap.add_argument("--figure_n", type=int, default=8)
+    ap.add_argument(
+        "--synthetic_summary",
+        default="results/paper_full_100ep/summary.csv",
+        help="final synthetic full-sweep summary used by the supplementary PDF",
+    )
+    ap.add_argument(
+        "--supplementary_pdf",
+        default="results/NSSR_supplementary.pdf",
+    )
+    ap.add_argument(
+        "--pdf_script",
+        default="scripts/make_supplementary_pdf.py",
+    )
+    ap.add_argument(
+        "--synthetic_figs",
+        nargs="*",
+        default=["results/paper_full_100ep/figures"],
+    )
+    ap.add_argument(
+        "--designer_figs",
+        nargs="*",
+        default=["results/designer_figures"],
+    )
+    ap.add_argument("--max_supp_figures", type=int, default=60)
+    ap.add_argument(
+        "--skip_supplementary",
+        action="store_true",
+        help="write domain_comparison.csv but do not build the PDF",
+    )
     ap.add_argument("--dry_run", action="store_true")
     a = ap.parse_args()
 
@@ -306,10 +435,41 @@ def main():
             ], a.dry_run)
 
     if not a.dry_run:
-        collect_domain(
-            rowspecs,
-            os.path.join(a.results, "domain_comparison.csv")
-        )
+        domain_out = os.path.join(a.results, "domain_comparison.csv")
+        collect_domain(rowspecs, domain_out)
+
+        if not a.skip_supplementary:
+            if not os.path.isfile(a.synthetic_summary):
+                raise FileNotFoundError(
+                    f"synthetic summary not found: {a.synthetic_summary}"
+                )
+            if not os.path.isfile(a.pdf_script):
+                raise FileNotFoundError(
+                    f"supplementary builder not found: {a.pdf_script}"
+                )
+
+            pdf_cmd = [
+                py, a.pdf_script,
+                "--synthetic_summary", a.synthetic_summary,
+                "--domain_summary", domain_out,
+                "--real_figs", os.path.join(a.results, "figures"),
+                "--max_figures", a.max_supp_figures,
+                "--out", a.supplementary_pdf,
+            ]
+            if a.synthetic_figs:
+                pdf_cmd += ["--synthetic_figs", *a.synthetic_figs]
+            if a.designer_figs:
+                pdf_cmd += ["--designer_figs", *a.designer_figs]
+
+            run(pdf_cmd, a.dry_run)
+
+            if not os.path.isfile(a.supplementary_pdf):
+                raise RuntimeError(
+                    "supplementary PDF generation completed without output: "
+                    + a.supplementary_pdf
+                )
+
+            print("wrote", a.supplementary_pdf)
 
     print("\nREAL/MIXED PAPER PIPELINE COMPLETE")
 
