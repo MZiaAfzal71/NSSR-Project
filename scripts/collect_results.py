@@ -31,8 +31,23 @@ def read_csv(path):
 
 
 def fval(x):
+    """Parse numeric and boolean CSV fields consistently.
+
+    validate.py writes Python booleans as True/False, while
+    evaluate_projection.py writes several corresponding flags as 0/1.
+    Treat both representations identically.
+    """
+    if x is None:
+        return float("nan")
+    if isinstance(x, bool):
+        return 1.0 if x else 0.0
+    s = str(x).strip()
+    if s.lower() == "true":
+        return 1.0
+    if s.lower() == "false":
+        return 0.0
     try:
-        return float(x)
+        return float(s)
     except (TypeError, ValueError):
         return float("nan")
 
@@ -206,12 +221,19 @@ def main():
             "raw_cap_safe_rate", "projection_raw_cap_safe_rate",
             "raw_safe_rate", "projection_raw_safe_rate",
         )):
-            diffs = [
-                abs(row["raw_j_valid_rate"] - row["projection_raw_j_valid_rate"]),
-                abs(row["raw_cap_safe_rate"] - row["projection_raw_cap_safe_rate"]),
-                abs(row["raw_safe_rate"] - row["projection_raw_safe_rate"]),
+            pairs = [
+                (row["raw_j_valid_rate"], row["projection_raw_j_valid_rate"]),
+                (row["raw_cap_safe_rate"], row["projection_raw_cap_safe_rate"]),
+                (row["raw_safe_rate"], row["projection_raw_safe_rate"]),
             ]
-            row["raw_evaluators_match"] = int(max(diffs) < 1e-12)
+            finite = all(
+                math.isfinite(float(a)) and math.isfinite(float(b))
+                for a, b in pairs
+            )
+            diffs = [abs(float(a) - float(b)) for a, b in pairs]
+            row["raw_evaluators_match"] = int(
+                finite and max(diffs) < 1e-12
+            )
 
         summary.append(row)
 
