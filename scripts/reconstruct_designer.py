@@ -17,6 +17,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 import torch
 import matplotlib
+from pathlib import Path
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -43,6 +45,11 @@ from nssr.safety import (
     scaled_params,
 )
 
+
+
+def change_to_npy(file_path):
+    # Path.with_suffix replaces the old extension with the new one
+    return str(Path(file_path).with_suffix('.npy'))
 
 
 def freeze_cap_params(params):
@@ -319,6 +326,7 @@ def render(S, path, title, hide_crown=False):
     always includes the full, accurately-computed crown patch -- nothing
     is removed from the reconstruction itself, only from this picture."""
     S = S.detach().cpu().numpy()
+    np.save(change_to_npy(path), S)
     n_patches = S.shape[0] - 1 if hide_crown else S.shape[0]
     fig = plt.figure(figsize=(7, 7))
     ax = fig.add_subplot(111, projection="3d")
