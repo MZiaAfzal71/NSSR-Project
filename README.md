@@ -28,7 +28,7 @@ The main released checkpoints are:
 
 ## Installation
 
-Use Python 3.10 or newer.  Create an isolated environment, install an appropriate PyTorch build for your CPU or CUDA system, then install the remaining packages.
+Use Python 3.10 or newer.  Create an isolated environment and install the minimum-version dependency set from `requirements.txt`.
 
 ```bash
 git clone https://github.com/MZiaAfzal71/NSSR-Project.git
@@ -37,19 +37,10 @@ cd NSSR-Project
 python -m venv .venv
 source .venv/bin/activate               # Windows: .venv\Scripts\activate
 python -m pip install --upgrade pip
-
-# Install PyTorch for your platform from https://pytorch.org/get-started/locally/
-python -m pip install torch
-
-python -m pip install numpy scipy matplotlib pandas pillow reportlab \
-    trimesh shapely pyvista vtk
+python -m pip install -r requirements.txt
 ```
 
-Optional package for downloading a new real-mesh corpus from Thingi10K:
-
-```bash
-python -m pip install 'thingi10k[clip]'
-```
+`requirements.txt` includes the optional `thingi10k[clip]` dependency used by the corpus-download script.  If you only need the synthetic workflow, it may be omitted from a local installation.  For a CUDA-enabled PyTorch build, follow the wheel-selection command at [pytorch.org](https://pytorch.org/get-started/locally/) and then rerun `python -m pip install -r requirements.txt` if needed.
 
 The scripts automatically use CUDA when `torch.cuda.is_available()` is true; CPU execution is supported but training and high-resolution rendering will be slower.
 
