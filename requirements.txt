@@ -1,0 +1,27 @@
+# NSSR runtime and manuscript-figure dependencies.
+# Python 3.10+ is recommended.
+#
+# For CUDA-enabled PyTorch, install the wheel selected at
+# https://pytorch.org/get-started/locally/ before or after this file.
+
+# Core numerical and learning stack
+numpy>=1.24
+scipy>=1.10
+torch>=2.1
+
+# Evaluation, plots, and publication figures
+matplotlib>=3.7
+pandas>=2.0
+pillow>=10.0
+pyvista>=0.43
+vtk>=9.2
+
+# Real-mesh ingestion and slicing
+trimesh>=4.0
+shapely>=2.0
+
+# Supplementary PDF assembly
+reportlab>=4.0
+
+# Optional real-mesh corpus acquisition used by fetch_thingi10k.py
+thingi10k[clip]
