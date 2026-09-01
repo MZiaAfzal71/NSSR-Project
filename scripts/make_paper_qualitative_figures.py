@@ -106,6 +106,104 @@ CONTOUR_COLORS = (
 )
 
 
+def realistic_designer_contours(name: str, points_per_contour: int):
+    """Return paper-facing, naturalistic contour stacks for the designer set.
+
+    These are still sparse planar inputs reconstructed by the exact same
+    classical/NSSR/safety path as every other example.  The profiles avoid
+    the earlier primitive look by adding a tapered curved banana, an apple
+    with gentle five-fold lobing and genuine calyx/stem dimples, and a vase
+    with a foot, shoulder, neck, and open rim.
+    """
+    theta = np.linspace(0.0, 2.0 * np.pi, points_per_contour, endpoint=False)
+
+    def ellipse(center, rx, ry):
+        return np.column_stack((
+            center[0] + rx * np.cos(theta),
+            center[1] + ry * np.sin(theta),
+        ))
+
+    if name == "banana":
+        z = np.array([-1.25, -1.00, -0.58, -0.08, 0.43, 0.82, 1.08])
+        centers = np.array([
+            [-0.32, -0.17], [-0.28, -0.13], [-0.18, -0.04],
+            [-0.02, 0.10], [0.16, 0.22], [0.31, 0.30], [0.40, 0.33],
+        ])
+        radii = np.array([0.09, 0.18, 0.28, 0.33, 0.31, 0.23, 0.11])
+        contours = [ellipse(c, r, 0.82 * r) for c, r in zip(centers, radii)]
+        return contours, z, (-1.42, 1.24), {
+            "base_circular": True,
+            "crown_circular": True,
+            "closed_top": True,
+        }
+
+    if name == "apple":
+        # The reversals at both ends deliberately retain the apple's
+        # inward calyx and stem-well cap behaviour.
+        z = np.array([0.28, 0.10, 0.00, 0.24, 0.73, 1.18, 1.48, 1.35, 1.22])
+        radii = np.array([0.16, 0.35, 0.66, 0.93, 1.05, 1.00, 0.84, 0.47, 0.20])
+        contours = []
+        for i, radius in enumerate(radii):
+            lobe = 1.0 + 0.055 * np.cos(5.0 * theta + 0.18)
+            # A small asymmetry suppresses the perfectly manufactured look
+            # while preserving a strictly positive, non-self-intersecting ring.
+            asymmetry = 1.0 + 0.018 * np.cos(theta - 0.65)
+            r = radius * lobe * asymmetry
+            center_x = -0.035 + 0.018 * (i / (len(radii) - 1) - 0.5)
+            contours.append(np.column_stack((
+                center_x + r * np.cos(theta),
+                0.97 * r * np.sin(theta),
+            )))
+        return contours, z, (0.19, 1.29), {
+            "base_circular": False,
+            "crown_circular": False,
+            "closed_top": True,
+            "use_null_hts_directly": True,
+        }
+
+    if name == "vase":
+        z = np.array([-1.30, -1.15, -0.90, -0.56, -0.10,
+                      0.36, 0.86, 1.28, 1.56, 1.80])
+        radii = np.array([0.24, 0.40, 0.38, 0.31, 0.48,
+                          0.39, 0.27, 0.17, 0.22, 0.42])
+        contours = [ellipse((0.0, 0.0), radius, 0.97 * radius)
+                    for radius in radii]
+        return contours, z, (-1.43, 1.96), {
+            "base_circular": True,
+            "crown_circular": False,
+            "closed_top": False,
+        }
+
+    raise ValueError(f"unknown designer shape: {name}")
+
+
+def load_realistic_designer(name: str, segment_points: int, device, dtype):
+    """Preprocess a naturalistic designer stack for the figure script only."""
+    from nssr.preprocess import preprocess_object
+
+    contours, z, null_hts, options = realistic_designer_contours(
+        name, 4 * segment_points
+    )
+    pre = preprocess_object(
+        contours,
+        z,
+        m=4 * segment_points,
+        null_hts=null_hts,
+        **options,
+    )
+    import torch
+    to_tensor = lambda value: torch.as_tensor(
+        np.asarray(value), device=device, dtype=dtype
+    )
+    obj = {key: to_tensor(pre[key]) for key in ("R", "Z", "RB", "RC", "Bh", "Th")}
+    obj.update(
+        base_circular=pre["base_circular"],
+        crown_circular=pre["crown_circular"],
+        closed_top=pre["closed_top"],
+    )
+    return obj, pre
+
+
 @dataclass
 class FigureRow:
     """Images and annotations for one object row in a comparison figure."""
@@ -445,11 +543,7 @@ def build_designer_rows(a: argparse.Namespace, paths: Mapping[str, Path]) -> lis
 
     from nssr.geometry import zero_params
     from nssr.networks import ParamNet, contour_features
-    from scripts.reconstruct_designer import (
-        load_designer,
-        project_to_safe,
-        surf,
-    )
+    from scripts.reconstruct_designer import project_to_safe, surf
 
     pv = configure_pyvista()
     device = choose_device(a, torch)
@@ -461,7 +555,7 @@ def build_designer_rows(a: argparse.Namespace, paths: Mapping[str, Path]) -> lis
 
     rows = []
     for name in DESIGNER_NAMES:
-        obj, _ = load_designer(
+        obj, _ = load_realistic_designer(
             name,
             a.designer_segment_points,
             device,
